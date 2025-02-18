@@ -1,5 +1,19 @@
 EXE_NAME :: "log_viewer";
 
+/*
+
+TODO:
+
+- anchors??
+- log parsing + semantic highlighting
+- BUG scroll bar almost non-existent
+- minimap
+- filterring? I'm not sure yet what I want/need
+- different panes for different ui elements
+- status bar
+
+*/
+
 main :: () {
     Profile();
 
@@ -58,7 +72,7 @@ frame_counter := 1;
 redraw_needed := false;
 
 main_font: Simp.Dynamic_Font;
-main_font_size := 18;
+main_font_size := 14;
 main_font_line_height: s64;
 main_font_mono_width: s64;
 
@@ -68,10 +82,32 @@ debug_text_color := #run hex_color("dddddd");
 text_buffer_data: string;
 text_buffer_line_offsets: [..] s64;
 
+text_pane_rect: Rectangle;
+left_column_rect: Rectangle;
+
 scroll_rows := 0;
 scroll_columns := 0;
 scroll_rows_at_click := 0;
+
 draggin_scroll_bar := false;
+scroll_bar_rect: Rectangle;
+scroll_bar_pad := 1;
+scroll_bar_slider_color := #run hex_color("d0d0d0");
+scroll_bar_anchor_min_width := 1.7;
+
+anchor_button_active_color  := #run hex_color("4050d0");
+anchor_button_hover_color   := #run hex_color("404040");
+anchor_line_highlight_color := #run hex_color("404040");
+anchors: [..] Anchor;
+Anchor :: struct {
+    line_index: s64;
+}
+hovered_anchor_button_line: s64 = -1;
+hovered_scroll_bar_anchor_index: s64 = -1;
+
+//
+// main update and draw proc
+//
 
 update_and_draw_frame :: () -> bool {
     t0 := seconds_since_init();
@@ -101,6 +137,10 @@ update_and_draw_frame :: () -> bool {
     for Input.events_this_frame {
         if it.type == .QUIT then should_quit = true;
 
+        if it.key_pressed && it.key_code == .F4 && it.shift_pressed {
+            debug_break();
+        }
+
         if it.key_pressed && it.key_code == .F4 && it.alt_pressed {
             should_quit = true;
         }
@@ -129,7 +169,7 @@ update_and_draw_frame :: () -> bool {
         if it.type == .MOUSE_WHEEL && modifiers == .SHIFT && !draggin_scroll_bar {
             ofs := it.wheel_delta / it.typical_wheel_delta;
 
-            scroll_columns += -ofs * 4;
+            scroll_columns += -ofs * 8;
             scroll_columns = max(scroll_columns, 0);
             redraw_needed = true;
         }
@@ -137,7 +177,6 @@ update_and_draw_frame :: () -> bool {
         if it.type == .MOUSE_WHEEL && !modifiers && !draggin_scroll_bar {
             ofs := it.wheel_delta / it.typical_wheel_delta;
             scroll_rows += -ofs * 3;
-            log("scroll_rows: %", scroll_rows);
             redraw_needed = true;
         }
     }
@@ -149,33 +188,115 @@ update_and_draw_frame :: () -> bool {
     absolute_mid_x := (absolute_left + absolute_right) / 2;
     absolute_mid_y := (absolute_bottom + absolute_top) / 2;
 
-    // text pane info
-    text_window_rect: Rect;
+    // scroll bar info
     {
-        using text_window_rect;
+        using scroll_bar_rect;
+        width  = 16;
+        left   = absolute_right - width;
+        top    = absolute_top;
+        height = xx window_size.y;
+    }
+
+    //
+    // text pane info
+    //
+    {
+        using text_pane_rect;
         left   = absolute_left + 40;
+        left = max(left, xx (main_font_line_height * 3));
         top    = absolute_top;
         width  = xx (window_size.x - 40 - 100);
         height = xx window_size.y;
     }
-
     total_line_count := text_buffer_line_offsets.count;
-    pane_line_count := text_window_rect.height / main_font_line_height;
-    zoom_ratio := pane_line_count / cast(float) total_line_count;
+    text_pane_row_count := text_pane_rect.height / main_font_line_height;
+
+    // XXX what's the english name for поле?
+    {
+        using left_column_rect;
+        left   = absolute_left;
+        top    = absolute_top;
+        width  = text_pane_rect.left - absolute_left;
+        height = xx window_size.y;
+    }
+
+    //
+    // scroll bar info
+    //
+    zoom_ratio := text_pane_row_count / cast(float) total_line_count;
     zoom_ratio = min(zoom_ratio, 1);
     scroll_bar_effective_height := window_size.y * zoom_ratio;
-    lines_per_scroll_bar_pixel := pane_line_count / scroll_bar_effective_height;
+    lines_per_scroll_bar_pixel := text_pane_row_count / scroll_bar_effective_height;
 
+    //
+    // drag scroll bar
+    //
     if draggin_scroll_bar {
         mouse_moved := mouse.y - mouse_at_click.y;
         scroll_rows = scroll_rows_at_click - xx (mouse_moved * lines_per_scroll_bar_pixel);
         scroll_rows = max(scroll_rows, 0);
 
-        log("scroll_rows: %", scroll_rows);
-
         if !key_is_down(.MOUSE_BUTTON_LEFT) draggin_scroll_bar = false;
 
         if mouse != mouse_last_frame then redraw_needed = true;
+    }
+
+    //
+    // anchor buttons
+    //
+    {
+        if !draggin_scroll_bar && axis_aligned_rectangle_contains(left_column_rect, mouse) {
+            hover_line_index := screen_position_to_row_index(left_column_rect, mouse.y);
+            assert(hover_line_index != -1);
+
+            if hover_line_index != hovered_anchor_button_line {
+                redraw_needed = true;
+                hovered_anchor_button_line = hover_line_index;
+            }
+
+            if is_click(.MOUSE_BUTTON_LEFT) {
+                found := false;
+                for anchors {
+                    if it.line_index != hover_line_index continue;
+                    remove it;
+                    found = true;
+                    break;
+                }
+
+                if !found {
+                    array_add(*anchors, .{ hover_line_index });
+                }
+            }
+        }
+
+        if hovered_anchor_button_line != -1 && !axis_aligned_rectangle_contains(left_column_rect, mouse) {
+            hovered_anchor_button_line = -1;
+            redraw_needed = true;
+        }
+    }
+
+    //
+    // scroll bar anchors
+    //
+    if !draggin_scroll_bar && axis_aligned_rectangle_contains(scroll_bar_rect, mouse) {
+        mouse_y_in_rect := mouse.y - bottom(scroll_bar_rect);
+        anchor_index := do_scroll_bar_anchors(scroll_bar_rect, .GET_HOVER, mouse_y_in_rect);
+
+        if anchor_index != -1 && is_click(.MOUSE_BUTTON_LEFT) {
+            anchor := anchors[anchor_index];
+            scroll_rows = anchor.line_index - text_pane_row_count / 2;
+        }
+
+        if anchor_index != hovered_scroll_bar_anchor_index {
+            hovered_scroll_bar_anchor_index = anchor_index;
+            redraw_needed = true;
+        }
+    }
+
+    // I'm sleepy but this doesn't work???
+    if hovered_scroll_bar_anchor_index != -1 && !axis_aligned_rectangle_contains(scroll_bar_rect, mouse) {
+        hovered_scroll_bar_anchor_index = -1;
+        redraw_needed = true;
     }
 
     if !redraw_needed return should_quit;
@@ -194,23 +315,65 @@ update_and_draw_frame :: () -> bool {
     // text pane draw
     {
         profile_t0 = seconds_since_init();
-        draw_text_pane(text_window_rect);
+        draw_text_pane(text_pane_rect);
         Profile();
+    }
+
+    // line anchors
+    {
+        rect := *left_column_rect;
+        x_tweak := -3;
+        y_tweak := (main_font.typical_descender + main_font.max_descender) / 2;
+
+        if hovered_anchor_button_line != -1 {
+            pad := 1;
+            color := anchor_button_hover_color;
+            h := main_font_line_height - 2 * pad;
+            w := h;
+            x := rect.left + rect.width - w - pad + x_tweak;
+
+            row_index := hovered_anchor_button_line - scroll_rows;
+            y_line := rect.top - (row_index + 1) * main_font_line_height + y_tweak;
+            y := y_line + pad;
+
+            // draw_axis_aligned_rectangle(xx (rect.left + rect.width - main_font_line_height),
+            //                             xx y_line,
+            //                             xx main_font_line_height, xx main_font_line_height, hex_color("000000"));
+            draw_hollow_axis_aligned_rectangle(xx x, xx y, xx w, xx h, border = 2, color);
+        }
+
+        {
+            color := anchor_button_active_color;
+            pad := 4;
+            h := main_font_line_height - 2 * pad;
+            w := h;
+            x := rect.left + rect.width - w - pad + x_tweak;
+            for anchors {
+                row_index := it.line_index - scroll_rows;
+                if row_index < 0 continue;
+                if row_index > rect.height * main_font_line_height continue;
+
+                y_line := rect.top - (row_index + 1) * main_font_line_height + y_tweak;
+                y := y_line + pad;
+                draw_axis_aligned_rectangle(xx x, xx y, xx w, xx h, color);
+            }
+        }
     }
 
     // scroll bar
     {
-        w := 8;
+        rect := *scroll_bar_rect;
+        w := rect.width - scroll_bar_pad * 2;
 
-        h := window_size.y * zoom_ratio;
+        h := rect.height * zoom_ratio;
         h = max(h, 20);
 
-        x := absolute_right - w;
+        x := rect.left + scroll_bar_pad;
 
         scroll_y := scroll_rows / lines_per_scroll_bar_pixel;
-        y := absolute_top - scroll_y - h;
+        y := rect.top - scroll_y - h;
 
-        color := hex_color("d0d0d0");
+        color := scroll_bar_slider_color;
         if is_click(.MOUSE_BUTTON_LEFT) && axis_aligned_rectangle_contains(xx x, xx y, xx w, xx h, mouse) {
             draggin_scroll_bar = true;
             redraw_needed = true;
@@ -218,6 +381,9 @@ update_and_draw_frame :: () -> bool {
         }
 
         draw_axis_aligned_rectangle(xx x, y, xx w, h, color);
+
+        mouse_y_in_rect := mouse.y - bottom(scroll_bar_rect);
+        do_scroll_bar_anchors(scroll_bar_rect, .DRAW, mouse_y_in_rect);
     }
 
     // frame counter
@@ -241,7 +407,48 @@ update_and_draw_frame :: () -> bool {
     return should_quit;
 }
 
-draw_text_pane :: (rect: Rect) {
+//
+// scroll bar stuff
+//
+
+do_scroll_bar_anchors :: (rect: Rectangle, mode: enum { DRAW; GET_HOVER; }, target_y: float) -> (index: s64) {
+    color := anchor_button_active_color;
+    hover_color := hex_color("e0e0e0");
+
+    hover_index := -1;
+
+    pixels_on_scroll_bar_per_text_line := rect.height / cast(float) text_buffer_line_offsets.count;
+    x := rect.left;
+    w := rect.width;
+    h := max(scroll_bar_anchor_min_width, pixels_on_scroll_bar_per_text_line);
+    slack := 1.2;
+    for anchors {
+        y := rect.top - (it.line_index + 1) * pixels_on_scroll_bar_per_text_line;
+
+        hover := (target_y >= y - slack && target_y <= y + h + slack);
+
+        if #complete mode == {
+        case .DRAW;
+            if hover {
+                draw_axis_aligned_rectangle(xx x, y - 1, xx w, 1, hover_color);
+                draw_axis_aligned_rectangle(xx x, y + h, xx w, 1, hover_color);
+                hover_index = it_index;
+            }
+            draw_axis_aligned_rectangle(xx x, y, xx w, h, color);
+
+        case .GET_HOVER;
+            if hover return it_index;
+        }
+    }
+
+    return hover_index;
+}
+
+//
+// text pane stuff
+//
+
+draw_text_pane :: (rect: Rectangle) {
     text_color       := hex_color("e0e0e0");
     background_color := hex_color("202020");
 
@@ -263,7 +470,9 @@ draw_text_pane :: (rect: Rect) {
         x := rect.left + text_pad;
         y := rect.top - h + scroll_rows * main_font_line_height;
 
+        line_index := 0;
         while tail {
+            defer line_index += 1;
             found:, line:, tail = split_from_left(tail, #char "\n");
 
             defer y -= h;
@@ -277,7 +486,21 @@ draw_text_pane :: (rect: Rect) {
             line.count = min(line.count, pane_width_in_characters);
 
             w_text := Simp.prepare_text(*main_font, line);
-            assert(w_text == main_font_mono_width * line.count);
+            // This fails for unicode!
+            // assert(w_text == main_font_mono_width * line.count);
+
+            anchored := false;
+            for anchors if it.line_index == line_index { anchored = true; break; }
+            if anchored {
+                w := rect.width;
+                h := 2;
+                x := rect.left;
+                y_tweak := (main_font.typical_descender + main_font.max_descender) / 2 - 2;
+                y_bottom := y + y_tweak;
+                y_top := y + main_font_line_height + y_tweak;
+                draw_axis_aligned_rectangle(xx x, xx y_bottom, xx w, 2, anchor_line_highlight_color);
+                draw_axis_aligned_rectangle(xx x, xx y_top,    xx w, 2, anchor_line_highlight_color);
+            }
 
             Simp.draw_prepared_text(*main_font, xx x, xx y, text_color);
         }
@@ -286,8 +509,32 @@ draw_text_pane :: (rect: Rect) {
 
 }
 
+screen_position_to_row_index :: (rect: Rectangle, y: float) -> s64 {
+    if y > xx rect.top return -1;
+    rect_bottom := rect.top - rect.height;
+    if y < xx rect_bottom return -1;
+
+    // Am I retarded?
+    y_in_rect_from_top := rect.height - (y - rect_bottom);
+    row_index := cast,trunc(s64) (y_in_rect_from_top / main_font_line_height);
+    return scroll_rows + row_index;
+}
+
+screen_space_rectangle_contains_line_index :: (rect: Rectangle, line_index: s64) -> bool {
+    // assumming scroll_rows ~ rect.top and main_font
+    row_index := line_index - scroll_rows;
+    if row_index < 0 return false;
+    if row_index > rect.height * main_font_line_height return false;
+    return true;
+}
+
+//
+// text buffer stuff
+//
+
 load_text_buffer_data :: () {
     text_buffer_data=, ok := read_entire_file(tprint("%/sample_log.txt", assets_directory));
+    // text_buffer_data=, ok := read_entire_file("main.jai");
     assert(ok);
 
     array_reset(*text_buffer_line_offsets);
@@ -323,12 +570,17 @@ reload_main_font :: () {
 // drawing
 //
 
-Rect :: struct {
+// Axis aligned rectangle
+Rectangle :: struct {
     left: s32;
+    // TODO: this should be bottom probably...
     top: s32;
     width: s32;
     height: s32;
 }
+
+bottom :: (using rect: Rectangle) -> s32 #expand { return top - height; }
+right  :: (using rect: Rectangle) -> s32 #expand { return left + width; }
 
 draw_axis_aligned_rectangle :: (p0: Vector2, p1: Vector2, color: Vector4) {
     Simp.immediate_quad(p0, .{ p0.x, p1.y }, p1, .{ p1.x, p0.y }, color, color, color, color);
@@ -342,12 +594,19 @@ draw_axis_aligned_rectangle :: (x: float, y: float, width: float, height: float,
                         color, color, color, color);
 }
 
-draw_axis_aligned_rectangle :: (rect: Rect, color: Vector4) {
+draw_axis_aligned_rectangle :: (rect: Rectangle, color: Vector4) {
     Simp.immediate_quad(.{ xx  rect.left              , xx (rect.top - rect.height) },
                         .{ xx  rect.left              , xx  rect.top                },
                         .{ xx (rect.left + rect.width), xx  rect.top                },
                         .{ xx (rect.left + rect.width), xx (rect.top - rect.height) },
                         color, color, color, color);
+}
+
+draw_hollow_axis_aligned_rectangle :: (x: float, y: float, width: float, height: float, border: float, color: Vector4) {
+    draw_axis_aligned_rectangle(x, y, border, height, color);
+    draw_axis_aligned_rectangle(x + border, y, width - 2 * border, border, color);
+    draw_axis_aligned_rectangle(x + width - border, y, border, height, color);
+    draw_axis_aligned_rectangle(x + border, y + height - border, width - 2 * border, border, color);
 }
 
 draw_fat_line :: (start: Vector2, end: Vector2, width: float32, color: Vector4) {
@@ -369,6 +628,11 @@ draw_fat_line :: (start: Vector2, end: Vector2, width: float32, color: Vector4) 
 //
 // math
 //
+
+axis_aligned_rectangle_contains :: inline (rect: Rectangle, point: Vector2) -> bool {
+    return axis_aligned_rectangle_contains(xx rect.left, xx (rect.top - rect.height),
+                                           xx rect.width, xx rect.height, point);
+}
 
 axis_aligned_rectangle_contains :: (left: float, bottom: float, width: float, height: float, point: Vector2) -> bool {
     if left > point.x            return false;
