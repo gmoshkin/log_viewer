@@ -85,9 +85,9 @@ text_buffer_line_offsets: [..] s64;
 text_pane_rect: Rectangle;
 left_column_rect: Rectangle;
 
-scroll_rows := 0;
+scroll_rows := 0.0;
 scroll_columns := 0;
-scroll_rows_at_click := 0;
+scroll_rows_at_click := 0.0;
 
 draggin_scroll_bar := false;
 scroll_bar_rect: Rectangle;
@@ -135,28 +135,35 @@ update_and_draw_frame :: () -> bool {
     defer mouse_last_frame = mouse;
 
     for Input.events_this_frame {
-        if it.type == .QUIT then should_quit = true;
-
-        if it.key_pressed && it.key_code == .F4 && it.shift_pressed {
-            debug_break();
-        }
-
-        if it.key_pressed && it.key_code == .F4 && it.alt_pressed {
-            should_quit = true;
-        }
-
-        if it.key_code == .MOUSE_BUTTON_LEFT && it.key_pressed {
-            redraw_needed = true;
-            mouse_at_click = mouse;
-        }
-
         modifiers: enum_flags { NONE :: 0x00; CTRL :: 0x01; SHIFT :: 0x02; ALT :: 0x04; };
         if key_is_down(.CTRL)  modifiers |= .CTRL;
         if key_is_down(.SHIFT) modifiers |= .SHIFT;
         if key_is_down(.ALT)   modifiers |= .ALT;
 
+        // if !it.repeat {
+        //     if it.type == .MOUSE_WHEEL
+        //         log("% % %", it.type, it.wheel_delta, it.touch_type);
+        //     else
+        //         log("%", it);
+        // }
+
+        if it.type == .QUIT then should_quit = true;
+
+        else if it.key_pressed && it.key_code == .F4 && it.shift_pressed {
+            debug_break();
+        }
+
+        else if it.key_pressed && it.key_code == .F4 && it.alt_pressed {
+            should_quit = true;
+        }
+
+        else if it.key_code == .MOUSE_BUTTON_LEFT && it.key_pressed {
+            redraw_needed = true;
+            mouse_at_click = mouse;
+        }
+
         // modules/Input doesn't set it.ctrl_pressed for MOUSE_WHEEL :(
-        if it.type == .MOUSE_WHEEL && modifiers == .CTRL && !draggin_scroll_bar {
+        else if it.type == .MOUSE_WHEEL && modifiers == .CTRL && !draggin_scroll_bar {
             ofs := it.wheel_delta / it.typical_wheel_delta;
 
             main_font_size += ofs;
@@ -166,7 +173,7 @@ update_and_draw_frame :: () -> bool {
         }
 
         // modules/Input doesn't set it.ctrl_pressed for MOUSE_WHEEL :(
-        if it.type == .MOUSE_WHEEL && modifiers == .SHIFT && !draggin_scroll_bar {
+        else if it.type == .MOUSE_WHEEL && modifiers == .SHIFT && !draggin_scroll_bar {
             ofs := it.wheel_delta / it.typical_wheel_delta;
 
             scroll_columns += -ofs * 8;
@@ -174,8 +181,8 @@ update_and_draw_frame :: () -> bool {
             redraw_needed = true;
         }
 
-        if it.type == .MOUSE_WHEEL && !modifiers && !draggin_scroll_bar {
-            ofs := it.wheel_delta / it.typical_wheel_delta;
+        else if it.type == .MOUSE_WHEEL && !modifiers && !draggin_scroll_bar {
+            ofs := it.wheel_delta / cast(float) it.typical_wheel_delta;
             scroll_rows += -ofs * 3;
             redraw_needed = true;
         }
@@ -210,6 +217,10 @@ update_and_draw_frame :: () -> bool {
     }
     total_line_count := text_buffer_line_offsets.count;
     text_pane_row_count := text_pane_rect.height / main_font_line_height;
+    // clamp update scroll_rows based on text_pane height.
+    // Not doing this when handling the input event, because text pane height is not known at that point
+    scroll_rows = max(scroll_rows, -text_pane_row_count / 2.0);
+    scroll_rows = min(scroll_rows, total_line_count - text_pane_row_count / 2.0);
 
     // XXX what's the english name for поле?
     {
@@ -224,9 +235,10 @@ update_and_draw_frame :: () -> bool {
     // scroll bar info
     //
     zoom_ratio := text_pane_row_count / cast(float) total_line_count;
-    zoom_ratio = min(zoom_ratio, 1);
-    scroll_bar_effective_height := window_size.y * zoom_ratio;
-    lines_per_scroll_bar_pixel := text_pane_row_count / scroll_bar_effective_height;
+    zoom_ratio = min(zoom_ratio, 1); // XXX looks sus
+    scroll_bar_slider_effective_height := scroll_bar_rect.height * zoom_ratio;
+    scroll_bar_slider_visible_height := max(scroll_bar_slider_effective_height, 20);
+    lines_per_scroll_bar_pixel := text_pane_row_count / scroll_bar_slider_effective_height;
 
     //
     // drag scroll bar
@@ -235,6 +247,7 @@ update_and_draw_frame :: () -> bool {
         mouse_moved := mouse.y - mouse_at_click.y;
         scroll_rows = scroll_rows_at_click - xx (mouse_moved * lines_per_scroll_bar_pixel);
         scroll_rows = max(scroll_rows, 0);
+        scroll_rows = min(scroll_rows, xx total_line_count - text_pane_row_count / 2.0);
 
         if !key_is_down(.MOUSE_BUTTON_LEFT) draggin_scroll_bar = false;
 
@@ -242,29 +255,29 @@ update_and_draw_frame :: () -> bool {
     }
 
     //
-    // anchor buttons
+    // update anchor buttons
     //
     {
         if !draggin_scroll_bar && axis_aligned_rectangle_contains(left_column_rect, mouse) {
             hover_line_index := screen_position_to_row_index(left_column_rect, mouse.y);
-            assert(hover_line_index != -1);
-
-            if hover_line_index != hovered_anchor_button_line {
-                redraw_needed = true;
-                hovered_anchor_button_line = hover_line_index;
-            }
-
-            if is_click(.MOUSE_BUTTON_LEFT) {
-                found := false;
-                for anchors {
-                    if it.line_index != hover_line_index continue;
-                    remove it;
-                    found = true;
-                    break;
+            if hover_line_index >= 0 {
+                if hover_line_index != hovered_anchor_button_line {
+                    redraw_needed = true;
+                    hovered_anchor_button_line = hover_line_index;
                 }
 
-                if !found {
-                    array_add(*anchors, .{ hover_line_index });
+                if is_click(.MOUSE_BUTTON_LEFT) {
+                    found := false;
+                    for anchors {
+                        if it.line_index != hover_line_index continue;
+                        remove it;
+                        found = true;
+                        break;
+                    }
+
+                    if !found {
+                        array_add(*anchors, .{ hover_line_index });
+                    }
                 }
             }
         }
@@ -276,7 +289,7 @@ update_and_draw_frame :: () -> bool {
     }
 
     //
-    // scroll bar anchors
+    // update scroll bar anchors
     //
     if !draggin_scroll_bar && axis_aligned_rectangle_contains(scroll_bar_rect, mouse) {
         mouse_y_in_rect := mouse.y - bottom(scroll_bar_rect);
@@ -284,7 +297,7 @@ update_and_draw_frame :: () -> bool {
 
         if anchor_index != -1 && is_click(.MOUSE_BUTTON_LEFT) {
             anchor := anchors[anchor_index];
-            scroll_rows = anchor.line_index - text_pane_row_count / 2;
+            scroll_rows = xx (anchor.line_index - text_pane_row_count / 2);
         }
 
         if anchor_index != hovered_scroll_bar_anchor_index {
@@ -312,19 +325,22 @@ update_and_draw_frame :: () -> bool {
 
     Simp.set_shader_for_color();
 
-    // text pane draw
+    // draw text pane
     {
         profile_t0 = seconds_since_init();
         draw_text_pane(text_pane_rect);
         Profile();
     }
 
-    // line anchors
+    //
+    // draw line anchors
+    //
     {
         rect := *left_column_rect;
         x_tweak := -3;
         y_tweak := (main_font.typical_descender + main_font.max_descender) / 2;
 
+        // hovered anchor button
         if hovered_anchor_button_line != -1 {
             pad := 1;
             color := anchor_button_hover_color;
@@ -336,12 +352,13 @@ update_and_draw_frame :: () -> bool {
             y_line := rect.top - (row_index + 1) * main_font_line_height + y_tweak;
             y := y_line + pad;
 
-            // draw_axis_aligned_rectangle(xx (rect.left + rect.width - main_font_line_height),
-            //                             xx y_line,
-            //                             xx main_font_line_height, xx main_font_line_height, hex_color("000000"));
+            draw_axis_aligned_rectangle(xx (rect.left + rect.width - main_font_line_height),
+                                        xx y_line,
+                                        xx main_font_line_height, xx main_font_line_height, hex_color("000000"));
             draw_hollow_axis_aligned_rectangle(xx x, xx y, xx w, xx h, border = 2, color);
         }
 
+        // active anchor buttons
         {
             color := anchor_button_active_color;
             pad := 4;
@@ -351,7 +368,7 @@ update_and_draw_frame :: () -> bool {
             for anchors {
                 row_index := it.line_index - scroll_rows;
                 if row_index < 0 continue;
-                if row_index > rect.height * main_font_line_height continue;
+                if row_index > xx (rect.height * main_font_line_height) continue;
 
                 y_line := rect.top - (row_index + 1) * main_font_line_height + y_tweak;
                 y := y_line + pad;
@@ -360,19 +377,21 @@ update_and_draw_frame :: () -> bool {
         }
     }
 
-    // scroll bar
+    // draw scroll bar & update scroll bar slider
     {
         rect := *scroll_bar_rect;
         w := rect.width - scroll_bar_pad * 2;
 
-        h := rect.height * zoom_ratio;
-        h = max(h, 20);
+        h := scroll_bar_slider_visible_height;
 
         x := rect.left + scroll_bar_pad;
 
         scroll_y := scroll_rows / lines_per_scroll_bar_pixel;
+        // FIXME: this is computed for the effective size, as a result the
+        // scrollbar doesn't fit nicely at the bottom of the screen... So frustrating!!!
         y := rect.top - scroll_y - h;
 
+        // update scroll bar slider
         color := scroll_bar_slider_color;
         if is_click(.MOUSE_BUTTON_LEFT) && axis_aligned_rectangle_contains(xx x, xx y, xx w, xx h, mouse) {
             draggin_scroll_bar = true;
@@ -382,6 +401,7 @@ update_and_draw_frame :: () -> bool {
 
         draw_axis_aligned_rectangle(xx x, y, xx w, h, color);
 
+        // draw scroll bar anchors
         mouse_y_in_rect := mouse.y - bottom(scroll_bar_rect);
         do_scroll_bar_anchors(scroll_bar_rect, .DRAW, mouse_y_in_rect);
     }
@@ -476,8 +496,8 @@ draw_text_pane :: (rect: Rectangle) {
             found:, line:, tail = split_from_left(tail, #char "\n");
 
             defer y -= h;
-            if y > rect.top continue;
-            if y < rect.top - rect.height - h continue;
+            if y > xx rect.top continue;
+            if y < xx (rect.top - rect.height - h) continue;
 
             if line.count <= scroll_columns
                 continue;
@@ -516,15 +536,16 @@ screen_position_to_row_index :: (rect: Rectangle, y: float) -> s64 {
 
     // Am I retarded?
     y_in_rect_from_top := rect.height - (y - rect_bottom);
-    row_index := cast,trunc(s64) (y_in_rect_from_top / main_font_line_height);
-    return scroll_rows + row_index;
+    // FIXME!!!! I have broken this !!!!!
+    row_index := cast,trunc(s64) (scroll_rows + y_in_rect_from_top / main_font_line_height);
+    return row_index;
 }
 
 screen_space_rectangle_contains_line_index :: (rect: Rectangle, line_index: s64) -> bool {
     // assumming scroll_rows ~ rect.top and main_font
     row_index := line_index - scroll_rows;
     if row_index < 0 return false;
-    if row_index > rect.height * main_font_line_height return false;
+    if row_index > cast(float) rect.height * main_font_line_height return false;
     return true;
 }
 
