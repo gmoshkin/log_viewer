@@ -18,6 +18,7 @@ main :: () {
     Profile();
 
     context.logger = my_logger;
+    context.print_style.struct_printer = my_struct_printer;
 
     #if OS == .WINDOWS {
         // In order to have a hope of waiting a reasonable amount of time,
@@ -535,7 +536,7 @@ screen_position_to_row_index :: (rect: Rectangle, y: float) -> s64 {
     if y < xx rect_bottom return -1;
 
     // Am I retarded?
-    y_in_rect_from_top := rect.height - (y - rect_bottom);
+    y_in_rect_from_top := rect.top - y;
     // FIXME!!!! I have broken this !!!!!
     row_index := cast,trunc(s64) (scroll_rows + y_in_rect_from_top / main_font_line_height);
     return row_index;
@@ -688,8 +689,11 @@ my_logger :: (message: string, data: *void, info: Log_Info) {
     builder: String_Builder;
     builder.allocator = temp;
     print_time_for_log(*builder, to_calendar(current_time_consensus(), .LOCAL));
+    print(*builder, ": ");
+    if #compile_time print(*builder, "#compile_time ");
+
     filename := path_filename(info.location.fully_pathed_filename);
-    print(*builder, ": [%:%] %\n", filename, info.location.line_number, message);
+    print(*builder, "[%:%] %\n", filename, info.location.line_number, message);
     write_builder(*builder);
 }
 
@@ -713,6 +717,50 @@ print_date_time_for_log :: (builder: *String_Builder, date_time: Calendar_Time) 
 }
 
 //
+// another attempt at struct printer
+//
+
+my_struct_printer :: (builder: *String_Builder, any: Any, struct_printer_data: *void) -> bool {
+    printer := get_constant_member_printer(any.type);
+    if printer != null {
+        return printer(builder, any, struct_printer_data);
+    }
+
+    if any.type == type_info(Source_Code_Location) {
+        print_source_code_location(builder, xx any.value_pointer);
+        return true;
+    }
+
+    return false;
+}
+
+Struct_Printer_Type :: #type (*String_Builder, Any, *void) -> bool;
+
+get_constant_member_printer :: (base_type: *Type_Info) -> Struct_Printer_Type {
+    printer_info :: type_info(Struct_Printer_Type);
+    result: Struct_Printer_Type = null;
+
+    if base_type.type != .STRUCT return null;
+    type := cast(*Type_Info_Struct) base_type;
+    for type.members {
+        if !(it.flags & .CONSTANT) continue;
+        if it.name != "printer" continue;
+        if it.type != printer_info continue;
+
+        pointer := type.constant_storage.data + it.offset_into_constant_storage;
+        result = cast(*Struct_Printer_Type, pointer).*;
+        return result;
+    }
+
+    return null;
+}
+
+print_source_code_location :: (builder: *String_Builder, location: *Source_Code_Location) {
+    filename := path_filename(location.fully_pathed_filename);
+    print(builder, "%:%", filename, location.line_number);
+}
+
+//
 // miscellaneous
 //
 
@@ -720,7 +768,8 @@ hex_color :: ($hex: string, $loc := #caller_location) -> Vector4 #expand {
     return #run -> Vector4 {
         result, ok := parse_hex_color(hex);
         assert(ok, "'%' is not a hex color", hex, loc=loc);
-        log("% = %", hex, result);
+        context.logger = my_logger;
+        log("hex_color(\"%\") = %", hex, result, loc=loc);
         return result;
     };
 }
