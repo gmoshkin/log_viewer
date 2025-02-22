@@ -96,6 +96,7 @@ scroll_bar_rect: Rectangle;
 scroll_bar_pad := 1;
 scroll_bar_slider_color := #run hex_color("d0d0d0");
 scroll_bar_anchor_min_width := 1.7;
+scroll_bar_effective_slider_color := #run hex_color("b0b0b0");
 
 anchor_button_active_color  := #run hex_color("4050d0");
 anchor_button_hover_color   := #run hex_color("404040");
@@ -106,6 +107,8 @@ Anchor :: struct {
 }
 hovered_anchor_button_line: s64 = -1;
 hovered_scroll_bar_anchor_index: s64 = -1;
+
+color_red := #run hex_color("e04020");
 
 //
 // main update and draw proc
@@ -325,6 +328,7 @@ update_and_draw_frame :: () -> bool {
     // TEMPORARY!!!
     if mouse_last_frame != mouse then redraw_needed = true;
 
+    if !Input.input_application_has_focus return should_quit;
     if !redraw_needed return should_quit;
     redraw_needed = false;
 
@@ -380,7 +384,8 @@ update_and_draw_frame :: () -> bool {
             x := rect.left + rect.width - w - pad + x_tweak;
             for anchors {
                 row_index := it.line_index - scroll_rows;
-                if row_index < 0 continue;
+                // -1 because want to draw half the button at the top of the screen (bad wording)
+                if row_index < -1 continue;
                 if row_index > xx (rect.height * main_font_line_height) continue;
 
                 y_line := rect.top - (row_index + 1) * main_font_line_height + y_tweak;
@@ -397,12 +402,19 @@ update_and_draw_frame :: () -> bool {
 
         h := scroll_bar_slider_visible_height;
 
+        //
+        // calculate the tweak that makes it so the oversized visual slider
+        // doesn't overflow at the bottom of the screen
+        //
+        assert(scroll_bar_slider_visible_height >= scroll_bar_slider_effective_height);
+        h_diff := scroll_bar_slider_visible_height - scroll_bar_slider_effective_height;
+        t := scroll_rows / cast(float) total_line_count;
+        y_tweak := h_diff * t;
+
         x := rect.left + scroll_bar_pad;
 
         scroll_y := scroll_rows / lines_per_scroll_bar_pixel;
-        // FIXME: this is computed for the effective size, as a result the
-        // scrollbar doesn't fit nicely at the bottom of the screen... So frustrating!!!
-        y := rect.top - scroll_y - h;
+        y := rect.top - scroll_y - h + y_tweak;
 
         // update scroll bar slider
         color := scroll_bar_slider_color;
@@ -412,7 +424,17 @@ update_and_draw_frame :: () -> bool {
             scroll_rows_at_click = scroll_rows;
         }
 
+        // visible scroll bar slider
         draw_axis_aligned_rectangle(xx x, y, xx w, h, color);
+
+        // effective scroll bar slider
+        if scroll_bar_slider_visible_height != scroll_bar_slider_effective_height {
+            color := scroll_bar_effective_slider_color;
+            x_pad := 2;
+            h := scroll_bar_slider_effective_height;
+            y := rect.top - scroll_y - h;
+            draw_axis_aligned_rectangle(xx (x + x_pad), y, xx (w - 2 * x_pad), xx h, color);
+        }
 
         // draw scroll bar anchors
         mouse_y_in_rect := mouse.y - bottom(scroll_bar_rect);
@@ -643,6 +665,7 @@ draw_simple_text_pane :: (rect: Rectangle, font: *Simp.Dynamic_Font, left: s64, 
     x := rect.left + left;
     y := bottom(rect) + top;
 
+    // draw background rect
     {
         X := x - x_pad;
         H := h * line_count;
@@ -651,6 +674,7 @@ draw_simple_text_pane :: (rect: Rectangle, font: *Simp.Dynamic_Font, left: s64, 
         draw_axis_aligned_rectangle(xx X, xx Y, xx W, xx H, background_color);
     }
 
+    // draw the text
     tail = text;
     for 1..line_count {
         y -= h;
