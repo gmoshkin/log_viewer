@@ -441,36 +441,22 @@ update_and_draw_frame :: () -> bool {
         do_scroll_bar_anchors(scroll_bar_rect, .DRAW, mouse_y_in_rect);
     }
 
-    // frame counter
-    {
-        elapsed := seconds_since_init() - t0;
-        font := *debug_font;
-        h := font.character_height;
-        w_text := Simp.prepare_text(font, tprint("% %", frame_counter, fmt(elapsed, 6)));
-
-        pad := 4;
-        x := absolute_left + pad;
-        y_tweak := 1;
-        y := absolute_top - h - pad - y_tweak;
-        Simp.draw_prepared_text(font, xx x, xx y);
-    }
-
     // debuggin
     {
-        /*
         rect := window_rect;
         font := *debug_font;
         x := right(window_rect) - 300;
         y := window_rect.top - 4;
 
         builder: String_Builder; builder.allocator = temp;
-        print(*builder, "scroll_rows: %\n", scroll_rows);
-        print(*builder, "mouse_from_top: %\n", rect.top - mouse.y);
-        print(*builder, "main_font_line_height: %\n", main_font_line_height);
+        elapsed := seconds_since_init() - t0;
+        print(*builder, "% %\n", frame_counter, fmt(elapsed, 6));
+        print(*builder, "scroll_rows: %\n", fmt(scroll_rows, 1));
+        // print(*builder, "mouse_from_top: %\n", rect.top - mouse.y);
+        // print(*builder, "main_font_line_height: %\n", main_font_line_height);
 
         pane_text := builder_to_string(*builder,, temp);
-        draw_simple_text_pane(rect, font, x, y, pane_text, hex_color("ffffff"), hex_color("104060"));
-        */
+        draw_simple_text_pane(rect, font, x, y, pane_text, hex_color("ffffff"), hex_color("181818"));
     }
 
     Simp.swap_buffers(window);
@@ -626,6 +612,12 @@ load_text_buffer_data :: () {
         max_line_length = max(max_line_length, line.count);
     }
 
+    // line_index := 0;
+    // while line_index < text_buffer_line_offsets.count {
+    //     defer line_index += 1000;
+    //     array_add(*anchors, .{ line_index });
+    // }
+
     log("line count: %", text_buffer_line_offsets.count);
     log("max line length: %", max_line_length);
 }
@@ -648,6 +640,8 @@ reload_main_font :: () {
 //
 
 draw_simple_text_pane :: (rect: Rectangle, font: *Simp.Dynamic_Font, left: s64, top: s64, text: string, text_color: Vector4, background_color: Vector4) {
+    if !text return;
+
     h := font.character_height;
     text_y_tweak := -(font.typical_descender + font.max_descender) / 2;
     x_pad := text_y_tweak;
