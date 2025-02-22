@@ -66,6 +66,7 @@ window_size: Vector2;
 mouse: Vector2;
 mouse_last_frame: Vector2;
 mouse_at_click: Vector2;
+window_rect: Rectangle;
 
 assets_directory: string;
 
@@ -195,6 +196,10 @@ update_and_draw_frame :: () -> bool {
     absolute_right := cast(s32) (window_size.x);
     absolute_mid_x := (absolute_left + absolute_right) / 2;
     absolute_mid_y := (absolute_bottom + absolute_top) / 2;
+    window_rect.top = xx window_size.y;
+    window_rect.left = 0;
+    window_rect.width = xx window_size.x;
+    window_rect.height = xx window_size.y;
 
     // scroll bar info
     {
@@ -280,6 +285,9 @@ update_and_draw_frame :: () -> bool {
                         array_add(*anchors, .{ hover_line_index });
                     }
                 }
+            } else {
+                hovered_anchor_button_line = -1;
+                redraw_needed = true;
             }
         }
 
@@ -313,6 +321,10 @@ update_and_draw_frame :: () -> bool {
         redraw_needed = true;
     }
 
+    ////////////////////////////////////////////////////////////////////////////
+    // TEMPORARY!!!
+    if mouse_last_frame != mouse then redraw_needed = true;
+
     if !redraw_needed return should_quit;
     redraw_needed = false;
 
@@ -339,7 +351,7 @@ update_and_draw_frame :: () -> bool {
     {
         rect := *left_column_rect;
         x_tweak := -3;
-        y_tweak := (main_font.typical_descender + main_font.max_descender) / 2;
+        y_tweak := 0;
 
         // hovered anchor button
         if hovered_anchor_button_line != -1 {
@@ -353,9 +365,9 @@ update_and_draw_frame :: () -> bool {
             y_line := rect.top - (row_index + 1) * main_font_line_height + y_tweak;
             y := y_line + pad;
 
-            draw_axis_aligned_rectangle(xx (rect.left + rect.width - main_font_line_height),
-                                        xx y_line,
-                                        xx main_font_line_height, xx main_font_line_height, hex_color("000000"));
+            // draw_axis_aligned_rectangle(xx (rect.left + rect.width - main_font_line_height),
+            //                             xx y_line,
+            //                             xx main_font_line_height, xx main_font_line_height, hex_color("000000"));
             draw_hollow_axis_aligned_rectangle(xx x, xx y, xx w, xx h, border = 2, color);
         }
 
@@ -419,6 +431,24 @@ update_and_draw_frame :: () -> bool {
         y_tweak := 1;
         y := absolute_top - h - pad - y_tweak;
         Simp.draw_prepared_text(font, xx x, xx y);
+    }
+
+    // debuggin
+    {
+        /*
+        rect := window_rect;
+        font := *debug_font;
+        x := right(window_rect) - 300;
+        y := window_rect.top - 4;
+
+        builder: String_Builder; builder.allocator = temp;
+        print(*builder, "scroll_rows: %\n", scroll_rows);
+        print(*builder, "mouse_from_top: %\n", rect.top - mouse.y);
+        print(*builder, "main_font_line_height: %\n", main_font_line_height);
+
+        pane_text := builder_to_string(*builder,, temp);
+        draw_simple_text_pane(rect, font, x, y, pane_text, hex_color("ffffff"), hex_color("104060"));
+        */
     }
 
     Simp.swap_buffers(window);
@@ -490,6 +520,7 @@ draw_text_pane :: (rect: Rectangle) {
 
         x := rect.left + text_pad;
         y := rect.top - h + scroll_rows * main_font_line_height;
+        text_y_tweak := -(main_font.typical_descender + main_font.max_descender) / 2;
 
         line_index := 0;
         while tail {
@@ -510,20 +541,23 @@ draw_text_pane :: (rect: Rectangle) {
             // This fails for unicode!
             // assert(w_text == main_font_mono_width * line.count);
 
+            // if line_index % 2 == 0
+            //     draw_axis_aligned_rectangle(xx x, xx y, xx rect.width, xx main_font_line_height, hex_color("005050"));
+
             anchored := false;
             for anchors if it.line_index == line_index { anchored = true; break; }
             if anchored {
                 w := rect.width;
                 h := 2;
                 x := rect.left;
-                y_tweak := (main_font.typical_descender + main_font.max_descender) / 2 - 2;
+                y_tweak := -2;
                 y_bottom := y + y_tweak;
                 y_top := y + main_font_line_height + y_tweak;
                 draw_axis_aligned_rectangle(xx x, xx y_bottom, xx w, 2, anchor_line_highlight_color);
                 draw_axis_aligned_rectangle(xx x, xx y_top,    xx w, 2, anchor_line_highlight_color);
             }
 
-            Simp.draw_prepared_text(*main_font, xx x, xx y, text_color);
+            Simp.draw_prepared_text(*main_font, xx x, xx y + text_y_tweak, text_color);
         }
 
     }
@@ -537,9 +571,8 @@ screen_position_to_row_index :: (rect: Rectangle, y: float) -> s64 {
 
     // Am I retarded?
     y_in_rect_from_top := rect.top - y;
-    // FIXME!!!! I have broken this !!!!!
-    row_index := cast,trunc(s64) (scroll_rows + y_in_rect_from_top / main_font_line_height);
-    return row_index;
+    row_index := floor(scroll_rows + y_in_rect_from_top / main_font_line_height);
+    return xx row_index;
 }
 
 screen_space_rectangle_contains_line_index :: (rect: Rectangle, line_index: s64) -> bool {
@@ -589,6 +622,44 @@ reload_main_font :: () {
 }
 
 //
+// ui primitives
+//
+
+draw_simple_text_pane :: (rect: Rectangle, font: *Simp.Dynamic_Font, left: s64, top: s64, text: string, text_color: Vector4, background_color: Vector4) {
+    h := font.character_height;
+    text_y_tweak := -(font.typical_descender + font.max_descender) / 2;
+    x_pad := text_y_tweak;
+
+    text_w_max := 0;
+    line_count := 0;
+    tail := text;
+    while tail {
+        found:, line:, tail = split_from_left(tail, #char "\n");
+        line_count += 1;
+        text_w := Simp.prepare_text(font, line);
+        text_w_max = max(text_w, text_w_max);
+    }
+
+    x := rect.left + left;
+    y := bottom(rect) + top;
+
+    {
+        X := x - x_pad;
+        H := h * line_count;
+        Y := y - H + 1;
+        W := text_w_max + x_pad * 2;
+        draw_axis_aligned_rectangle(xx X, xx Y, xx W, xx H, background_color);
+    }
+
+    tail = text;
+    for 1..line_count {
+        y -= h;
+        found:, line:, tail = split_from_left(tail, #char "\n");
+        Simp.draw_text(font, xx x, xx y + text_y_tweak, line, text_color);
+    }
+}
+
+//
 // drawing
 //
 
@@ -601,8 +672,8 @@ Rectangle :: struct {
     height: s32;
 }
 
-bottom :: (using rect: Rectangle) -> s32 #expand { return top - height; }
-right  :: (using rect: Rectangle) -> s32 #expand { return left + width; }
+bottom :: (rect: Rectangle) -> s32 #expand { return rect.top - rect.height; }
+right  :: (rect: Rectangle) -> s32 #expand { return rect.left + rect.width; }
 
 draw_axis_aligned_rectangle :: (p0: Vector2, p1: Vector2, color: Vector4) {
     Simp.immediate_quad(p0, .{ p0.x, p1.y }, p1, .{ p1.x, p0.y }, color, color, color, color);
