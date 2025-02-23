@@ -51,6 +51,8 @@ main :: () {
     msaa := Simp.prepare_window(window, wanted_msaa = WANTED_MSAA);
     Simp.set_render_target(window);
 
+    redraw_reasons.allocator = temp;
+
     should_quit := false;
     while !should_quit {
         should_quit = update_and_draw_frame();
@@ -76,6 +78,12 @@ assets_directory: string;
 
 frame_counter := 1;
 redraw_needed := false;
+redraw_reasons: [..] string;
+request_redraw :: (reason: string, loc := #caller_location) {
+    redraw_needed = true;
+    if reason then array_add(*redraw_reasons, reason);
+              else array_add(*redraw_reasons, tprint("at %", loc));
+}
 
 main_font := My_Dynamic_Font.{
     pixel_height = 14,
@@ -103,11 +111,13 @@ scroll_bar_effective_slider_color := #run hex_color("b0b0b0");
 anchor_button_active_color  := #run hex_color("4050d0");
 anchor_button_hover_color   := #run hex_color("404040");
 anchor_line_highlight_color := #run hex_color("404040");
-anchors: [..] Anchor;
+explicit_anchors: [..] Anchor;
 Anchor :: struct {
     line_index: s64;
 }
 hovered_anchor_button_line: s64 = -1;
+
+hovered_scroll_bar_anchor_kind: enum { EXPLICIT; SEARCH_MATCH; };
 hovered_scroll_bar_anchor_index: s64 = -1;
 
 color_red := #run hex_color("e04020");
@@ -119,6 +129,8 @@ color_red := #run hex_color("e04020");
 update_and_draw_frame :: () -> bool {
     t0 := seconds_since_init();
 
+    array_reset_keeping_memory(*redraw_reasons);
+
     should_quit := false;
 
     Input.update_window_events();
@@ -129,7 +141,7 @@ update_and_draw_frame :: () -> bool {
         window_size.y = xx it.height;
         log("window_size: %", window_size);
 
-        redraw_needed = true;
+        request_redraw("window size");
     }
 
     {
@@ -234,7 +246,7 @@ update_and_draw_frame :: () -> bool {
         }
 
         else if it.key_code == .MOUSE_BUTTON_LEFT && it.key_pressed {
-            redraw_needed = true;
+            request_redraw("mouse click");
             mouse_at_click = mouse;
 
             // if text_search_ui_active && !axis_aligned_rectangle_contains(text_search_ui_rect, mouse) {
@@ -249,7 +261,7 @@ update_and_draw_frame :: () -> bool {
             main_font.pixel_height += ofs;
             main_font.pixel_height = max(main_font.pixel_height, 1);
             reload_main_font();
-            redraw_needed = true;
+            request_redraw(tprint("scroll at %", #line));
         }
 
         // modules/Input doesn't set it.ctrl_pressed for MOUSE_WHEEL :(
@@ -258,50 +270,50 @@ update_and_draw_frame :: () -> bool {
 
             scroll_columns += -ofs * 8;
             scroll_columns = max(scroll_columns, 0);
-            redraw_needed = true;
+            request_redraw(tprint("scroll at %", #line));
         }
 
         else if it.type == .MOUSE_WHEEL && !modifiers && !draggin_scroll_bar {
             target_scroll_rows = scroll_rows;
             target_scroll_rows += -3 * it.wheel_delta / cast(float) it.typical_wheel_delta;
             target_scroll_rows = clamp(target_scroll_rows, -text_pane_row_count / 2.0, total_line_count - text_pane_row_count / 2.0);
-            redraw_needed = true;
+            request_redraw(tprint("scroll at %", #line));
         }
 
         else if it.key_code == xx #char "F" && it.ctrl_pressed && !text_search_ui_open {
             open_text_search_ui();
             // text_search_ui_active = true;
-            redraw_needed = true;
+            request_redraw("open search ui");
         }
 
         else if it.key_pressed && it.key_code == .PAGE_UP {
             target_scroll_rows = scroll_rows;
             target_scroll_rows += -text_pane_row_count;
             target_scroll_rows = clamp(target_scroll_rows, -text_pane_row_count / 2.0, total_line_count - text_pane_row_count / 2.0);
-            redraw_needed = true;
+            request_redraw(tprint("scroll at %", #line));
         } else if it.key_pressed && it.key_code == .PAGE_DOWN {
             target_scroll_rows = scroll_rows;
             target_scroll_rows += text_pane_row_count;
             target_scroll_rows = clamp(target_scroll_rows, -text_pane_row_count / 2.0, total_line_count - text_pane_row_count / 2.0);
-            redraw_needed = true;
+            request_redraw(tprint("scroll at %", #line));
         } else if it.key_pressed && it.key_code == .ARROW_UP {
             target_scroll_rows = scroll_rows;
             target_scroll_rows += -1;
             target_scroll_rows = clamp(target_scroll_rows, -text_pane_row_count / 2.0, total_line_count - text_pane_row_count / 2.0);
-            redraw_needed = true;
+            request_redraw(tprint("scroll at %", #line));
         } else if it.key_pressed && it.key_code == .ARROW_DOWN {
             target_scroll_rows = scroll_rows;
             target_scroll_rows += 1;
             target_scroll_rows = clamp(target_scroll_rows, -text_pane_row_count / 2.0, total_line_count - text_pane_row_count / 2.0);
-            redraw_needed = true;
+            request_redraw(tprint("scroll at %", #line));
         } else if it.key_pressed && it.key_code == .HOME && it.ctrl_pressed {
             target_scroll_rows = scroll_rows;
             target_scroll_rows = 0;
-            redraw_needed = true;
+            request_redraw(tprint("scroll at %", #line));
         } else if it.key_pressed && it.key_code == .END && it.ctrl_pressed {
             target_scroll_rows = scroll_rows;
             target_scroll_rows = total_line_count - text_pane_row_count / 2.0;
-            redraw_needed = true;
+            request_redraw(tprint("scroll at %", #line));
         }
 
 
@@ -312,6 +324,9 @@ update_and_draw_frame :: () -> bool {
 
     // update scroll bar
     scroll_rows = lerp(scroll_rows, target_scroll_rows, scroll_rows_lerp_factor);
+    if abs(scroll_rows - target_scroll_rows) < 0.0001 {
+        scroll_rows = target_scroll_rows;
+    }
 
     //
     // drag scroll bar
@@ -324,7 +339,9 @@ update_and_draw_frame :: () -> bool {
 
         if !key_is_down(.MOUSE_BUTTON_LEFT) draggin_scroll_bar = false;
 
-        if mouse != mouse_last_frame then redraw_needed = true;
+        if mouse != mouse_last_frame {
+            request_redraw(tprint("scroll at %", #line));
+        }
     }
 
     //
@@ -335,13 +352,13 @@ update_and_draw_frame :: () -> bool {
             hover_line_index := screen_position_to_line_index(left_column_rect, mouse.y);
             if hover_line_index >= 0 {
                 if hover_line_index != hovered_anchor_button_line {
-                    redraw_needed = true;
                     hovered_anchor_button_line = hover_line_index;
+                    request_redraw(tprint("anchor buttons at %", #line));
                 }
 
                 if is_click(.MOUSE_BUTTON_LEFT) {
                     found := false;
-                    for anchors {
+                    for explicit_anchors {
                         if it.line_index != hover_line_index continue;
                         remove it;
                         found = true;
@@ -349,18 +366,18 @@ update_and_draw_frame :: () -> bool {
                     }
 
                     if !found {
-                        array_add(*anchors, .{ hover_line_index });
+                        array_add(*explicit_anchors, .{ hover_line_index });
                     }
                 }
             } else if hovered_anchor_button_line != -1 {
                 hovered_anchor_button_line = -1;
-                redraw_needed = true;
+                request_redraw(tprint("anchor buttons at %", #line));
             }
         }
 
         if hovered_anchor_button_line != -1 && !axis_aligned_rectangle_contains(left_column_rect, mouse) {
             hovered_anchor_button_line = -1;
-            redraw_needed = true;
+            request_redraw(tprint("anchor buttons at %", #line));
         }
     }
 
@@ -368,38 +385,53 @@ update_and_draw_frame :: () -> bool {
     // update scroll bar anchors
     //
     if !draggin_scroll_bar {
+        anchor_kind := hovered_scroll_bar_anchor_kind;
         // I'm not actually sure this is needed...
-        mouse_x_in_rect := mouse.x - scroll_bar_rect.left;
-        mouse_y_in_rect := mouse.y - bottom(scroll_bar_rect);
-        anchor_index := do_scroll_bar_anchors(scroll_bar_rect, .GET_HOVER, .{mouse_x_in_rect, mouse_y_in_rect});
+        mouse_in_rect := mouse - .{xx scroll_bar_rect.left, xx bottom(scroll_bar_rect)};
+        anchor_index := do_scroll_bar_anchors(scroll_bar_rect, explicit_anchors, anchor_button_active_color, .GET_HOVER, mouse_in_rect);
+        if anchor_index != -1 {
+            anchor_kind = .EXPLICIT;
+        } else {
+            anchor_index = do_scroll_bar_anchors(scroll_bar_rect, search_results.matches, search_match_color, .GET_HOVER, mouse_in_rect);
+            anchor_kind = .SEARCH_MATCH;
+        }
 
-        // TODO handle search matches similarly
         if anchor_index != -1 && is_click(.MOUSE_BUTTON_LEFT) {
-            anchor := anchors[anchor_index];
-            target_scroll_rows = xx (anchor.line_index - text_pane_row_count / 2);
-            redraw_needed = true;
+            line_index: int;
+            if #complete anchor_kind == {
+                case .EXPLICIT;     line_index = explicit_anchors[anchor_index].line_index;
+                case .SEARCH_MATCH; line_index = search_results.matches[anchor_index].line_index;
+            }
+            target_scroll_rows = xx (line_index - text_pane_row_count / 2);
+            request_redraw(tprint("scroll bar anchors at %", #line));
         }
 
-        if anchor_index != hovered_scroll_bar_anchor_index {
+        if anchor_index != hovered_scroll_bar_anchor_index || anchor_kind != hovered_scroll_bar_anchor_kind {
+            builder: String_Builder;
+            builder.allocator = temp;
+            if anchor_index != hovered_scroll_bar_anchor_index
+                print(*builder, "% -> % ", hovered_scroll_bar_anchor_index, anchor_index);
+            if anchor_kind != hovered_scroll_bar_anchor_kind
+                print(*builder, "% -> % ", hovered_scroll_bar_anchor_kind, anchor_kind);
+            request_redraw(builder_to_string(*builder));
             hovered_scroll_bar_anchor_index = anchor_index;
-            redraw_needed = true;
+            hovered_scroll_bar_anchor_kind = anchor_kind;
         }
-    }
-
-    // I'm sleepy but this doesn't work???
-    if hovered_scroll_bar_anchor_index != -1 && !axis_aligned_rectangle_contains(scroll_bar_rect, mouse) {
-        hovered_scroll_bar_anchor_index = -1;
-        redraw_needed = true;
     }
 
     ////////////////////////////////////////////////////////////////////////////
     // TEMPORARY!!!
-    if mouse_last_frame != mouse then redraw_needed = true;
-    redraw_needed ||= target_scroll_rows != scroll_rows;
+    if mouse_last_frame != mouse {
+        request_redraw("mouse moved");
+    }
+    if target_scroll_rows != scroll_rows {
+        request_redraw(tprint("scroll animation %", target_scroll_rows - scroll_rows));
+    }
 
     if !Input.input_application_has_focus return should_quit;
     if !redraw_needed return should_quit;
-    redraw_needed = false;
+    // One last redraw to update the redraw reason
+    redraw_needed = (redraw_reasons.count != 0);
 
     //
     // render start
@@ -453,7 +485,7 @@ update_and_draw_frame :: () -> bool {
             h := main_font.line_height - 2 * pad;
             w := h;
             x := rect.left + rect.width - w - pad + x_tweak;
-            for anchors {
+            for explicit_anchors {
                 row_index := it.line_index - scroll_rows;
                 // -1 because want to draw half the button at the top of the screen (bad wording)
                 if row_index < -1 continue;
@@ -491,8 +523,8 @@ update_and_draw_frame :: () -> bool {
         color := scroll_bar_slider_color;
         if is_click(.MOUSE_BUTTON_LEFT) && axis_aligned_rectangle_contains(xx x, xx y, xx w, xx h, mouse) {
             draggin_scroll_bar = true;
-            redraw_needed = true;
             scroll_rows_at_click = scroll_rows;
+            request_redraw(tprint("scroll bar at %", #line));
         }
 
         // draw visible scroll bar slider
@@ -530,9 +562,10 @@ update_and_draw_frame :: () -> bool {
         }
 
         // draw scroll bar anchors
-        mouse_x_in_rect := mouse.x - scroll_bar_rect.left;
-        mouse_y_in_rect := mouse.y - bottom(scroll_bar_rect);
-        do_scroll_bar_anchors(scroll_bar_rect, .DRAW, .{mouse_x_in_rect, mouse_y_in_rect});
+        mouse_in_rect := mouse - .{xx scroll_bar_rect.left, xx bottom(scroll_bar_rect)};
+        do_scroll_bar_anchors(scroll_bar_rect, search_results.matches, search_match_color, .DRAW, mouse_in_rect);
+        // explicit anchors have higher priority
+        do_scroll_bar_anchors(scroll_bar_rect, explicit_anchors, anchor_button_active_color, .DRAW, mouse_in_rect);
 
         if text_search_ui_open {
             draw_text_search_ui(text_search_ui_rect, main_font);
@@ -555,6 +588,7 @@ update_and_draw_frame :: () -> bool {
         if text_search_ui_open print(*builder, "cursor: %\n", text_input_cursor);
         if text_search_ui_open print(*builder, "search matches: %\n", search_results.matches.count);
         if text_search_ui_open print(*builder, "case-insensitive: %\n", search_results.case_insensitive);
+        for redraw_reasons print(*builder, "%\n", it);
         // print(*builder, "mouse_from_top: %\n", rect.top - mouse.y);
         // print(*builder, "main_font_line_height: %\n", main_font.line_height);
 
@@ -573,10 +607,11 @@ update_and_draw_frame :: () -> bool {
 // scroll bar stuff
 //
 
-do_scroll_bar_anchors :: (rect: Rectangle, mode: enum { DRAW; GET_HOVER; }, target_in_rect: Vector2) -> (index: s64) {
+do_scroll_bar_anchors :: (parent_rect: Rectangle, anchors: [] $T, color: Vector4, $mode: enum { DRAW; GET_HOVER; }, target_in_rect: Vector2, do_hover := true) -> (index: s64) {
     target := target_in_rect;
-    color := anchor_button_active_color;
     hover_color := hex_color("e0e0e0");
+
+    do_hover_ := (mode == .GET_HOVER) || do_hover;
 
     active_anchor_triangle_size := 10.0;
     triangle_middle_x_tweak := 2.0;
@@ -585,17 +620,17 @@ do_scroll_bar_anchors :: (rect: Rectangle, mode: enum { DRAW; GET_HOVER; }, targ
 
     hover_index := -1;
 
-    pixels_on_scroll_bar_per_text_line := rect.height / cast(float) text_buffer_line_infos.count;
-    x := rect.left;
-    w := rect.width;
+    pixels_on_scroll_bar_per_text_line := parent_rect.height / cast(float) text_buffer_line_infos.count;
+    x := parent_rect.left;
+    w := parent_rect.width;
     h := cast(float) max(scroll_bar_anchor_min_width, pixels_on_scroll_bar_per_text_line);
     slack := 1.2;
     for anchors {
-        y := rect.top - (it.line_index + 1) * pixels_on_scroll_bar_per_text_line;
+        y := parent_rect.top - (it.line_index + 1) * pixels_on_scroll_bar_per_text_line;
 
-        hover := (target.x >= -triangle_corner_x_tweak && target.x <= xx rect.width && target.y >= y - slack && target.y <= y + h + slack);
+        hover := do_hover_ && (target.x >= -triangle_corner_x_tweak && target.x <= xx parent_rect.width && target.y >= y - slack && target.y <= y + h + slack);
 
-        if #complete mode == {
+        #if #complete mode == {
         case .DRAW;
             if hover {
                 draw_axis_aligned_rectangle(xx x, y - 1, xx w, 1, hover_color);
@@ -643,7 +678,7 @@ draw_the_text_pane :: (rect: Rectangle) {
         hover_line_index = screen_position_to_line_index(rect, mouse.y);
     }
 
-    // sample text
+    // text
     {
         tail := text_buffer_data;
 
@@ -667,7 +702,7 @@ draw_the_text_pane :: (rect: Rectangle) {
             if y < xx (rect.top - rect.height - h) continue;
 
             anchored := false;
-            for anchors if it.line_index == line_index { anchored = true; break; }
+            for explicit_anchors if it.line_index == line_index { anchored = true; break; }
             if anchored {
                 w := rect.width;
                 h := 2;
@@ -845,7 +880,7 @@ load_text_buffer_data :: () {
     // line_index := 0;
     // while line_index < text_buffer_line_infos.count {
     //     defer line_index += 1000;
-    //     array_add(*anchors, .{ line_index });
+    //     array_add(*explicit_anchors, .{ line_index });
     // }
 
     log("line count: %", text_buffer_line_infos.count);
@@ -1187,17 +1222,17 @@ text_search_ui_handle_input_event :: (event: Input.Event) {
 
         update_text_buffer_search_results(xx text_input_buffer);
 
-        redraw_needed = true;
+        request_redraw(tprint("text search at %", #line));
     } else if event.key_code == {
         case .ESCAPE;
             close_text_search_ui();
-            redraw_needed = true;
+            request_redraw(tprint("text search at %", #line));
 
         case .BACKSPACE;
             if text_input_cursor > 0 {
                 array_ordered_remove_range(*text_input_buffer, text_input_cursor - 1, text_input_cursor);
                 text_input_cursor -= 1;
-                redraw_needed = true;
+                request_redraw(tprint("text search at %", #line));
 
                 update_text_buffer_search_results(xx text_input_buffer);
             }
@@ -1205,29 +1240,29 @@ text_search_ui_handle_input_event :: (event: Input.Event) {
         case .DELETE;
             if text_input_buffer.count > 0 && text_input_cursor < text_input_buffer.count {
                 array_ordered_remove_range(*text_input_buffer, text_input_cursor, text_input_cursor + 1);
-                redraw_needed = true;
+                request_redraw(tprint("text search at %", #line));
 
                 update_text_buffer_search_results(xx text_input_buffer);
             }
 
         case .ARROW_LEFT;
             if text_input_cursor > 0 then text_input_cursor -= 1;
-            redraw_needed = true;
+            request_redraw(tprint("text search at %", #line));
 
         case .ARROW_RIGHT;
             if text_input_cursor < text_input_buffer.count then text_input_cursor += 1;
-            redraw_needed = true;
+            request_redraw(tprint("text search at %", #line));
 
         case .ARROW_UP; // TODO: history
         case .ARROW_DOWN; // TODO: history
 
         case .HOME;
             text_input_cursor = 0;
-            redraw_needed = true;
+            request_redraw(tprint("text search at %", #line));
 
         case .END;
             text_input_cursor = text_input_buffer.count;
-            redraw_needed = true;
+            request_redraw(tprint("text search at %", #line));
 
         case .ENTER;
             forwards := !event.shift_pressed;
