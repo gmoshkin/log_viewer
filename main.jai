@@ -43,6 +43,7 @@ main :: () {
 
     reload_main_font();
     debug_font = Simp.get_font_at_size(assets_directory, "Codetta-Regular.ttf", 14);
+    assert(debug_font == main_font.regular);
 
     msaa := Simp.prepare_window(window, wanted_msaa = WANTED_MSAA);
     Simp.set_render_target(window);
@@ -73,13 +74,11 @@ assets_directory: string;
 frame_counter := 1;
 redraw_needed := false;
 
-main_font: Simp.Dynamic_Font;
-main_font_bold: Simp.Dynamic_Font;
-main_font_size := 14;
-main_font_line_height: s64;
-main_font_mono_width: s64;
+main_font := My_Dynamic_Font.{
+    pixel_height = 14,
+};
 
-debug_font: Simp.Dynamic_Font;
+debug_font: *Simp.Dynamic_Font;
 debug_text_color := #run hex_color("dddddd");
 
 text_pane_rect: Rectangle;
@@ -137,59 +136,9 @@ update_and_draw_frame :: () -> bool {
     }
     defer mouse_last_frame = mouse;
 
-    for Input.events_this_frame {
-        modifiers: enum_flags { NONE :: 0x00; CTRL :: 0x01; SHIFT :: 0x02; ALT :: 0x04; };
-        if key_is_down(.CTRL)  modifiers |= .CTRL;
-        if key_is_down(.SHIFT) modifiers |= .SHIFT;
-        if key_is_down(.ALT)   modifiers |= .ALT;
-
-        // if !it.repeat {
-        //     if it.type == .MOUSE_WHEEL
-        //         log("% % %", it.type, it.wheel_delta, it.touch_type);
-        //     else
-        //         log("%", it);
-        // }
-
-        if it.type == .QUIT then should_quit = true;
-
-        else if it.key_pressed && it.key_code == .F4 && it.shift_pressed {
-            debug_break();
-        }
-
-        else if it.key_pressed && it.key_code == .F4 && it.alt_pressed {
-            should_quit = true;
-        }
-
-        else if it.key_code == .MOUSE_BUTTON_LEFT && it.key_pressed {
-            redraw_needed = true;
-            mouse_at_click = mouse;
-        }
-
-        // modules/Input doesn't set it.ctrl_pressed for MOUSE_WHEEL :(
-        else if it.type == .MOUSE_WHEEL && modifiers == .CTRL && !draggin_scroll_bar {
-            ofs := it.wheel_delta / it.typical_wheel_delta;
-
-            main_font_size += ofs;
-            main_font_size = max(main_font_size, 1);
-            reload_main_font();
-            redraw_needed = true;
-        }
-
-        // modules/Input doesn't set it.ctrl_pressed for MOUSE_WHEEL :(
-        else if it.type == .MOUSE_WHEEL && modifiers == .SHIFT && !draggin_scroll_bar {
-            ofs := it.wheel_delta / cast(float) it.typical_wheel_delta;
-
-            scroll_columns += -ofs * 8;
-            scroll_columns = max(scroll_columns, 0);
-            redraw_needed = true;
-        }
-
-        else if it.type == .MOUSE_WHEEL && !modifiers && !draggin_scroll_bar {
-            ofs := it.wheel_delta / cast(float) it.typical_wheel_delta;
-            scroll_rows += -ofs * 3;
-            redraw_needed = true;
-        }
-    }
+    //
+    // update rectangles dependent on window size
+    //
 
     absolute_top := cast(s32) (window_size.y);
     absolute_bottom := cast(s32) (0);
@@ -217,17 +166,13 @@ update_and_draw_frame :: () -> bool {
     {
         using text_pane_rect;
         left   = absolute_left + 40;
-        left = max(left, xx (main_font_line_height * 3));
+        left = max(left, xx (main_font.line_height * 3));
         top    = absolute_top;
         width  = xx (window_size.x - 40 - 100);
         height = xx window_size.y;
     }
     total_line_count := text_buffer_line_infos.count;
-    text_pane_row_count := text_pane_rect.height / main_font_line_height;
-    // clamp update scroll_rows based on text_pane height.
-    // Not doing this when handling the input event, because text pane height is not known at that point
-    scroll_rows = max(scroll_rows, -text_pane_row_count / 2.0);
-    scroll_rows = min(scroll_rows, total_line_count - text_pane_row_count / 2.0);
+    text_pane_row_count := text_pane_rect.height / main_font.line_height;
 
     // XXX what's the english name for поле?
     {
@@ -246,6 +191,89 @@ update_and_draw_frame :: () -> bool {
     scroll_bar_slider_effective_height := scroll_bar_rect.height * zoom_ratio;
     scroll_bar_slider_visible_height := max(scroll_bar_slider_effective_height, 20);
     lines_per_scroll_bar_pixel := text_pane_row_count / scroll_bar_slider_effective_height;
+
+    // text ui info
+    {
+        using text_search_ui_rect;
+        left = absolute_left + 100;
+        top = absolute_bottom + 60;
+        width = 800;
+        height = xx (main_font.line_height + text_search_ui_border_width * 4);
+    }
+
+    //
+    // handle input events
+    //
+
+    for Input.events_this_frame {
+        modifiers: enum_flags { NONE :: 0x00; CTRL :: 0x01; SHIFT :: 0x02; ALT :: 0x04; };
+        if key_is_down(.CTRL)  modifiers |= .CTRL;
+        if key_is_down(.SHIFT) modifiers |= .SHIFT;
+        if key_is_down(.ALT)   modifiers |= .ALT;
+
+        // if !it.repeat {
+        //     if it.type == .MOUSE_WHEEL
+        //         log("% % %", it.type, it.wheel_delta, it.touch_type);
+        //     else
+        //         log("%", it);
+        // }
+
+        if it.type == .QUIT then should_quit = true;
+
+        else if it.key_pressed && it.key_code == .F4 && it.shift_pressed {
+            debug_break();
+        }
+
+        else if it.key_pressed && it.key_code == .F4 && it.alt_pressed {
+            should_quit = true;
+        }
+
+        else if it.key_code == .MOUSE_BUTTON_LEFT && it.key_pressed {
+            redraw_needed = true;
+            mouse_at_click = mouse;
+
+            // if text_search_ui_active && !axis_aligned_rectangle_contains(text_search_ui_rect, mouse) {
+            //     text_search_ui_active = false;
+            // }
+        }
+
+        // modules/Input doesn't set it.ctrl_pressed for MOUSE_WHEEL :(
+        else if it.type == .MOUSE_WHEEL && modifiers == .CTRL && !draggin_scroll_bar {
+            ofs := it.wheel_delta / it.typical_wheel_delta;
+
+            main_font.pixel_height += ofs;
+            main_font.pixel_height = max(main_font.pixel_height, 1);
+            reload_main_font();
+            redraw_needed = true;
+        }
+
+        // modules/Input doesn't set it.ctrl_pressed for MOUSE_WHEEL :(
+        else if it.type == .MOUSE_WHEEL && modifiers == .SHIFT && !draggin_scroll_bar {
+            ofs := it.wheel_delta / cast(float) it.typical_wheel_delta;
+
+            scroll_columns += -ofs * 8;
+            scroll_columns = max(scroll_columns, 0);
+            redraw_needed = true;
+        }
+
+        else if it.type == .MOUSE_WHEEL && !modifiers && !draggin_scroll_bar {
+            ofs := it.wheel_delta / cast(float) it.typical_wheel_delta;
+            scroll_rows += -ofs * 3;
+            scroll_rows = max(scroll_rows, -text_pane_row_count / 2.0);
+            scroll_rows = min(scroll_rows, total_line_count - text_pane_row_count / 2.0);
+            redraw_needed = true;
+        }
+
+        else if it.key_code == xx #char "F" && it.ctrl_pressed && !text_search_ui_open {
+            open_text_search_ui();
+            // text_search_ui_active = true;
+            redraw_needed = true;
+        }
+
+        else if text_search_ui_open {
+            text_search_ui_handle_input_event(it);
+        }
+    }
 
     //
     // drag scroll bar
@@ -362,17 +390,17 @@ update_and_draw_frame :: () -> bool {
         if hovered_anchor_button_line != -1 {
             pad := 1;
             color := anchor_button_hover_color;
-            h := main_font_line_height - 2 * pad;
+            h := main_font.line_height - 2 * pad;
             w := h;
             x := rect.left + rect.width - w - pad + x_tweak;
 
             row_index := hovered_anchor_button_line - scroll_rows;
-            y_line := rect.top - (row_index + 1) * main_font_line_height + y_tweak;
+            y_line := rect.top - (row_index + 1) * main_font.line_height + y_tweak;
             y := y_line + pad;
 
-            // draw_axis_aligned_rectangle(xx (rect.left + rect.width - main_font_line_height),
+            // draw_axis_aligned_rectangle(xx (rect.left + rect.width - main_font.line_height),
             //                             xx y_line,
-            //                             xx main_font_line_height, xx main_font_line_height, hex_color("000000"));
+            //                             xx main_font.line_height, xx main_font.line_height, hex_color("000000"));
             draw_hollow_axis_aligned_rectangle(xx x, xx y, xx w, xx h, border = 2, color);
         }
 
@@ -380,16 +408,16 @@ update_and_draw_frame :: () -> bool {
         {
             color := anchor_button_active_color;
             pad := 4;
-            h := main_font_line_height - 2 * pad;
+            h := main_font.line_height - 2 * pad;
             w := h;
             x := rect.left + rect.width - w - pad + x_tweak;
             for anchors {
                 row_index := it.line_index - scroll_rows;
                 // -1 because want to draw half the button at the top of the screen (bad wording)
                 if row_index < -1 continue;
-                if row_index > xx (rect.height * main_font_line_height) continue;
+                if row_index > xx (rect.height * main_font.line_height) continue;
 
-                y_line := rect.top - (row_index + 1) * main_font_line_height + y_tweak;
+                y_line := rect.top - (row_index + 1) * main_font.line_height + y_tweak;
                 y := y_line + pad;
                 draw_axis_aligned_rectangle(xx x, xx y, xx w, xx h, color);
             }
@@ -463,12 +491,16 @@ update_and_draw_frame :: () -> bool {
         mouse_x_in_rect := mouse.x - scroll_bar_rect.left;
         mouse_y_in_rect := mouse.y - bottom(scroll_bar_rect);
         do_scroll_bar_anchors(scroll_bar_rect, .DRAW, .{mouse_x_in_rect, mouse_y_in_rect});
+
+        if text_search_ui_open {
+            draw_text_search_ui(text_search_ui_rect, main_font);
+        }
     }
 
     // debuggin
     {
         rect := window_rect;
-        font := *debug_font;
+        font := debug_font;
         x := right(window_rect) - 300;
         y := window_rect.top - 4;
 
@@ -477,9 +509,11 @@ update_and_draw_frame :: () -> bool {
         print(*builder, "% %\n", frame_counter, fmt(elapsed, 6));
         print(*builder, "scroll: %, %\n", fmt(scroll_columns, 1), fmt(scroll_rows, 1));
         print(*builder, "num sources: %\n", text_buffer_all_log_sources.count);
-        print(*builder, "num ranges: %\n", log_ranges_of_source.count);
+        // print(*builder, "num ranges: %\n", log_ranges_of_source.count);
+        if text_search_ui_open
+            print(*builder, "cursor: %\n", text_input_cursor);
         // print(*builder, "mouse_from_top: %\n", rect.top - mouse.y);
-        // print(*builder, "main_font_line_height: %\n", main_font_line_height);
+        // print(*builder, "main_font_line_height: %\n", main_font.line_height);
 
         pane_text := builder_to_string(*builder,, temp);
         draw_simple_text_pane(rect, font, x, y, pane_text, hex_color("ffffff"), hex_color("181818"));
@@ -549,9 +583,12 @@ do_scroll_bar_anchors :: (rect: Rectangle, mode: enum { DRAW; GET_HOVER; }, targ
 // text pane stuff
 //
 
+main_text_pane_text_color       := #run hex_color("e0e0e0");
+main_text_pane_background_color := #run hex_color("202020");
+
 draw_the_text_pane :: (rect: Rectangle) {
-    text_color       := hex_color("e0e0e0");
-    background_color := hex_color("202020");
+    text_color       := main_text_pane_text_color;
+    background_color := main_text_pane_background_color;
 
     // background
     {
@@ -567,13 +604,13 @@ draw_the_text_pane :: (rect: Rectangle) {
     {
         tail := text_buffer_data;
 
-        h := main_font_line_height;
+        h := main_font.line_height;
 
         text_pad := 4;
-        pane_width_in_characters := (rect.width - text_pad) / main_font_mono_width;
+        pane_width_in_characters := (rect.width - text_pad) / main_font.mono_width;
 
         x := rect.left + text_pad;
-        y := rect.top - h + scroll_rows * main_font_line_height;
+        y := rect.top - h + scroll_rows * main_font.line_height;
         text_y_tweak := -(main_font.typical_descender + main_font.max_descender) / 2;
 
         line_index := 0;
@@ -593,7 +630,7 @@ draw_the_text_pane :: (rect: Rectangle) {
                 x := rect.left;
                 y_tweak := -2;
                 y_bottom := y + y_tweak;
-                y_top := y + main_font_line_height + y_tweak;
+                y_top := y + main_font.line_height + y_tweak;
                 draw_axis_aligned_rectangle(xx x, xx y_bottom, xx w, 2, anchor_line_highlight_color);
                 draw_axis_aligned_rectangle(xx x, xx y_top,    xx w, 2, anchor_line_highlight_color);
             }
@@ -607,22 +644,22 @@ draw_the_text_pane :: (rect: Rectangle) {
                 color = get_log_source_color(info.source_id);
             }
 
-            font := *main_font;
+            font := main_font.regular;
             if line_index == hover_line_index {
-                font = *main_font_bold;
+                font = main_font.bold;
             }
 
             n_columns_to_skip := floor(scroll_columns);
-            x_tweak := (scroll_columns - n_columns_to_skip) * main_font_mono_width;
+            x_tweak := (scroll_columns - n_columns_to_skip) * main_font.mono_width;
             line = advance(line, xx n_columns_to_skip);
             line.count = min(line.count, pane_width_in_characters);
 
             w_text := Simp.prepare_text(font, line);
             // This fails for unicode!
-            // assert(w_text == main_font_mono_width * line.count);
+            // assert(w_text == main_font.mono_width * line.count);
 
             // if line_index % 2 == 0
-            //     draw_axis_aligned_rectangle(xx x, xx y, xx rect.width, xx main_font_line_height, hex_color("005050"));
+            //     draw_axis_aligned_rectangle(xx x, xx y, xx rect.width, xx main_font.line_height, hex_color("005050"));
 
             Simp.draw_prepared_text(font, xx (x - x_tweak), xx y + text_y_tweak, color);
         }
@@ -638,7 +675,7 @@ screen_position_to_line_index :: (rect: Rectangle, y: float) -> s64 {
 
     // Am I retarded?
     y_in_rect_from_top := rect.top - y;
-    row_index := floor(scroll_rows + y_in_rect_from_top / main_font_line_height);
+    row_index := floor(scroll_rows + y_in_rect_from_top / main_font.line_height);
     return xx row_index;
 }
 
@@ -775,25 +812,180 @@ add_source :: (sources: *[..] string, source: string) -> u8 {
 // font stuff
 //
 
+My_Dynamic_Font :: struct {
+    using regular: *Simp.Dynamic_Font;
+    bold: *Simp.Dynamic_Font;
+    pixel_height: int;
+    mono_width: int;
+    line_height: int;
+}
+
 reload_main_font :: () {
-    regular_font_file_name :: "Codetta-Regular.ttf";
-    log("loading '%' at size %", regular_font_file_name, main_font_size);
-    main_font = Simp.get_font_at_size(assets_directory, regular_font_file_name, main_font_size);
+    load_font("Codetta-Regular.ttf", "Codetta-Bold.ttf", *main_font);
+}
 
-    bold_font_file_name :: "Codetta-Bold.ttf";
-    log("loading '%' at size %", bold_font_file_name, main_font_size);
-    main_font_bold = Simp.get_font_at_size(assets_directory, bold_font_file_name, main_font_size);
+load_font :: (regular_name: string, bold_name: string, font: *My_Dynamic_Font) {
+    assert(font.pixel_height >= 0);
 
-    main_font_line_height = xx (main_font.character_height - main_font.typical_descender);
-    text_width := Simp.prepare_text(*main_font, "abc");
-    main_font_mono_width = text_width / 3;
+    log("loading '%' at size %", regular_name, font.pixel_height);
+    font.regular = Simp.get_font_at_size(assets_directory, regular_name, font.pixel_height);
+
+    log("loading '%' at size %", bold_name, font.pixel_height);
+    font.bold = Simp.get_font_at_size(assets_directory, bold_name, font.pixel_height);
+
+    font.line_height = xx (font.character_height - font.typical_descender);
+    text_width := Simp.prepare_text(font.regular, "abc");
+    font.mono_width = text_width / 3;
+}
+
+//
+// text search ui
+//
+
+text_search_ui_open := false;
+text_search_ui_active := false;
+text_search_builder: String_Builder;
+text_search_string: string;
+text_search_ui_rect: Rectangle;
+
+text_search_ui_background_color := #run hex_color("181818");
+text_search_ui_border_color := #run hex_color("303030");
+text_search_ui_cursor_color := #run hex_color("ffffff");
+text_search_ui_text_color := #run hex_color("ffffff");
+text_search_ui_border_width := 3.0;
+
+text_input_cursor: s64;
+text_input_buffer: [..] u8;
+
+open_text_search_ui :: () {
+    text_search_ui_open = true;
+}
+
+close_text_search_ui :: () {
+    text_search_ui_open = false;
+}
+
+text_search_ui_handle_input_event :: (event: Input.Event) {
+    if !event.key_pressed return;
+
+    if event.key_code >= #char " " && event.key_code <= #char "~" {
+        if event.ctrl_pressed return;
+        if event.alt_pressed return;
+
+        char := cast(u8) event.key_code;
+        if event.shift_pressed {
+            if char == {
+                case #char "`";  char = #char "~";
+                case #char "1";  char = #char "!";
+                case #char "2";  char = #char "@";
+                case #char "3";  char = #char "#";
+                case #char "4";  char = #char "$";
+                case #char "5";  char = #char "%";
+                case #char "6";  char = #char "^";
+                case #char "7";  char = #char "&";
+                case #char "8";  char = #char "*";
+                case #char "9";  char = #char "(";
+                case #char "0";  char = #char ")";
+                case #char "-";  char = #char "_";
+                case #char "[";  char = #char "{";
+                case #char "]";  char = #char "}";
+                case #char "\\"; char = #char "|";
+                case #char ";";  char = #char ":";
+                case #char "'";  char = #char "\"";
+                case #char ",";  char = #char "<";
+                case #char ".";  char = #char ">";
+                case #char "/";  char = #char "?";
+            }
+        } else {
+            if char >= #char "A" && char <= #char "Z" {
+                char += #char "a" - #char "A";
+            } else if char == {
+                // WTF is this???
+                case #char "+"; char = #char "=";
+            }
+        }
+
+        array_insert_at(*text_input_buffer, char, text_input_cursor);
+        text_input_cursor += 1;
+
+        // TODO: live search update
+
+        redraw_needed = true;
+    } else if event.key_code == {
+        case .ESCAPE;
+            close_text_search_ui();
+            redraw_needed = true;
+            // TODO: live search update
+
+        case .BACKSPACE;
+            if text_input_cursor > 0 {
+                array_ordered_remove_range(*text_input_buffer, text_input_cursor - 1, text_input_cursor);
+                text_input_cursor -= 1;
+                redraw_needed = true;
+            }
+            // TODO: live search update
+
+        case .DELETE;
+            if text_input_buffer.count > 0 && text_input_cursor < text_input_buffer.count {
+                array_ordered_remove_range(*text_input_buffer, text_input_cursor, text_input_cursor + 1);
+                redraw_needed = true;
+            }
+            // TODO: live search update
+
+        case .ARROW_LEFT;
+            if text_input_cursor > 0 then text_input_cursor -= 1;
+            redraw_needed = true;
+
+        case .ARROW_RIGHT;
+            if text_input_cursor < text_input_buffer.count then text_input_cursor += 1;
+            redraw_needed = true;
+
+        case .ARROW_UP; // TODO: history
+        case .ARROW_DOWN; // TODO: history
+
+        case .HOME;
+            text_input_cursor = 0;
+            redraw_needed = true;
+
+        case .END;
+            text_input_cursor = text_input_buffer.count;
+            redraw_needed = true;
+
+        case .ENTER;
+            // TODO: jump to next
+    }
+}
+
+draw_text_search_ui :: (rect: Rectangle, font: My_Dynamic_Font) {
+    draw_axis_aligned_rectangle(rect, text_search_ui_background_color);
+    draw_hollow_axis_aligned_rectangle(xx rect.left, xx bottom(rect), xx rect.width, xx rect.height,
+                                       border = text_search_ui_border_width, text_search_ui_border_color);
+
+    border_width := text_search_ui_border_width;
+    text_x_tweak := border_width * 2 + 2;
+    text_y_tweak := border_width * 2 + 2;
+    text_x := rect.left + text_x_tweak;
+    text_y := bottom(rect) + text_y_tweak;
+
+    Simp.draw_text(font.regular, xx text_x, xx text_y, xx text_input_buffer, text_search_ui_text_color);
+
+    // TODO: scrolling
+    {
+        x := text_x + font.mono_width * text_input_cursor;
+        cursor_y_tweak := -2.0;
+        y := text_y + cursor_y_tweak;
+        w := 2;
+        h := font.line_height;
+
+        draw_axis_aligned_rectangle(xx x, xx y, xx w, xx h, text_search_ui_cursor_color);
+    }
 }
 
 //
 // ui primitives
 //
 
-draw_simple_text_pane :: (rect: Rectangle, font: *Simp.Dynamic_Font, left: s64, top: s64, text: string, text_color: Vector4, background_color: Vector4) {
+draw_simple_text_pane :: (parent_rect: Rectangle, font: *Simp.Dynamic_Font, left: s64, top: s64, text: string, text_color: Vector4, background_color: Vector4) {
     if !text return;
 
     h := font.character_height;
@@ -810,8 +1002,8 @@ draw_simple_text_pane :: (rect: Rectangle, font: *Simp.Dynamic_Font, left: s64, 
         text_w_max = max(text_w, text_w_max);
     }
 
-    x := rect.left + left;
-    y := bottom(rect) + top;
+    x := parent_rect.left + left;
+    y := bottom(parent_rect) + top;
 
     // draw background rect
     {
@@ -1060,6 +1252,23 @@ hex_digit :: inline (c: u8) -> u8, bool {
     } else {
         return 0xff, false;
     }
+}
+
+array_ordered_remove_range :: inline (array_pointer: *[] $T, start: s64, end: s64) {
+    assert(0 <= start, "start: %", start);
+    assert(start < array_pointer.count, "start: %, array_poniter.count: %", start, array_pointer.count);
+    assert(start <= end, "start: %, end: %", start, end);
+    assert(end <= array_pointer.count, "end: %, array_poniter.count: %", end, array_pointer.count);
+
+    if start == end return;
+
+    array := <<array_pointer;
+    count := end - start;
+
+    for i : start..array.count-count-1
+        array[i] = array[i+count];
+
+    array_pointer.count -= count;
 }
 
 advance :: (array: [] u8, bytes: s64) -> result: [] u8 {
