@@ -15,6 +15,9 @@ TODO:
 */
 
 main :: () {
+    // test_search_for_match();
+    // return;
+
     Profile();
 
     context.logger = my_logger;
@@ -85,6 +88,8 @@ text_pane_rect: Rectangle;
 left_column_rect: Rectangle;
 
 scroll_rows := 0.0;
+target_scroll_rows := 0.0;
+scroll_rows_lerp_factor := 0.5;
 scroll_columns := 0.0;
 scroll_rows_at_click := 0.0;
 
@@ -257,10 +262,9 @@ update_and_draw_frame :: () -> bool {
         }
 
         else if it.type == .MOUSE_WHEEL && !modifiers && !draggin_scroll_bar {
-            ofs := it.wheel_delta / cast(float) it.typical_wheel_delta;
-            scroll_rows += -ofs * 3;
-            scroll_rows = max(scroll_rows, -text_pane_row_count / 2.0);
-            scroll_rows = min(scroll_rows, total_line_count - text_pane_row_count / 2.0);
+            target_scroll_rows = scroll_rows;
+            target_scroll_rows += -3 * it.wheel_delta / cast(float) it.typical_wheel_delta;
+            target_scroll_rows = clamp(target_scroll_rows, -text_pane_row_count / 2.0, total_line_count - text_pane_row_count / 2.0);
             redraw_needed = true;
         }
 
@@ -270,10 +274,44 @@ update_and_draw_frame :: () -> bool {
             redraw_needed = true;
         }
 
+        else if it.key_pressed && it.key_code == .PAGE_UP {
+            target_scroll_rows = scroll_rows;
+            target_scroll_rows += -text_pane_row_count;
+            target_scroll_rows = clamp(target_scroll_rows, -text_pane_row_count / 2.0, total_line_count - text_pane_row_count / 2.0);
+            redraw_needed = true;
+        } else if it.key_pressed && it.key_code == .PAGE_DOWN {
+            target_scroll_rows = scroll_rows;
+            target_scroll_rows += text_pane_row_count;
+            target_scroll_rows = clamp(target_scroll_rows, -text_pane_row_count / 2.0, total_line_count - text_pane_row_count / 2.0);
+            redraw_needed = true;
+        } else if it.key_pressed && it.key_code == .ARROW_UP {
+            target_scroll_rows = scroll_rows;
+            target_scroll_rows += -1;
+            target_scroll_rows = clamp(target_scroll_rows, -text_pane_row_count / 2.0, total_line_count - text_pane_row_count / 2.0);
+            redraw_needed = true;
+        } else if it.key_pressed && it.key_code == .ARROW_DOWN {
+            target_scroll_rows = scroll_rows;
+            target_scroll_rows += 1;
+            target_scroll_rows = clamp(target_scroll_rows, -text_pane_row_count / 2.0, total_line_count - text_pane_row_count / 2.0);
+            redraw_needed = true;
+        } else if it.key_pressed && it.key_code == .HOME && it.ctrl_pressed {
+            target_scroll_rows = scroll_rows;
+            target_scroll_rows = 0;
+            redraw_needed = true;
+        } else if it.key_pressed && it.key_code == .END && it.ctrl_pressed {
+            target_scroll_rows = scroll_rows;
+            target_scroll_rows = total_line_count - text_pane_row_count / 2.0;
+            redraw_needed = true;
+        }
+
+
         else if text_search_ui_open {
             text_search_ui_handle_input_event(it);
         }
     }
+
+    // update scroll bar
+    scroll_rows = lerp(scroll_rows, target_scroll_rows, scroll_rows_lerp_factor);
 
     //
     // drag scroll bar
@@ -281,8 +319,8 @@ update_and_draw_frame :: () -> bool {
     if draggin_scroll_bar {
         mouse_moved := mouse.y - mouse_at_click.y;
         scroll_rows = scroll_rows_at_click - xx (mouse_moved * lines_per_scroll_bar_pixel);
-        scroll_rows = max(scroll_rows, 0);
-        scroll_rows = min(scroll_rows, xx total_line_count - text_pane_row_count / 2.0);
+        scroll_rows = clamp(scroll_rows, 0, total_line_count - text_pane_row_count / 2.0);
+        target_scroll_rows = scroll_rows;
 
         if !key_is_down(.MOUSE_BUTTON_LEFT) draggin_scroll_bar = false;
 
@@ -314,7 +352,7 @@ update_and_draw_frame :: () -> bool {
                         array_add(*anchors, .{ hover_line_index });
                     }
                 }
-            } else {
+            } else if hovered_anchor_button_line != -1 {
                 hovered_anchor_button_line = -1;
                 redraw_needed = true;
             }
@@ -335,9 +373,10 @@ update_and_draw_frame :: () -> bool {
         mouse_y_in_rect := mouse.y - bottom(scroll_bar_rect);
         anchor_index := do_scroll_bar_anchors(scroll_bar_rect, .GET_HOVER, .{mouse_x_in_rect, mouse_y_in_rect});
 
+        // TODO handle search matches similarly
         if anchor_index != -1 && is_click(.MOUSE_BUTTON_LEFT) {
             anchor := anchors[anchor_index];
-            scroll_rows = xx (anchor.line_index - text_pane_row_count / 2);
+            target_scroll_rows = xx (anchor.line_index - text_pane_row_count / 2);
             redraw_needed = true;
         }
 
@@ -356,6 +395,7 @@ update_and_draw_frame :: () -> bool {
     ////////////////////////////////////////////////////////////////////////////
     // TEMPORARY!!!
     if mouse_last_frame != mouse then redraw_needed = true;
+    redraw_needed ||= target_scroll_rows != scroll_rows;
 
     if !Input.input_application_has_focus return should_quit;
     if !redraw_needed return should_quit;
@@ -403,6 +443,8 @@ update_and_draw_frame :: () -> bool {
             //                             xx main_font.line_height, xx main_font.line_height, hex_color("000000"));
             draw_hollow_axis_aligned_rectangle(xx x, xx y, xx w, xx h, border = 2, color);
         }
+
+        // TODO handle search matches similarly
 
         // active anchor buttons
         {
@@ -510,8 +552,9 @@ update_and_draw_frame :: () -> bool {
         print(*builder, "scroll: %, %\n", fmt(scroll_columns, 1), fmt(scroll_rows, 1));
         print(*builder, "num sources: %\n", text_buffer_all_log_sources.count);
         // print(*builder, "num ranges: %\n", log_ranges_of_source.count);
-        if text_search_ui_open
-            print(*builder, "cursor: %\n", text_input_cursor);
+        if text_search_ui_open print(*builder, "cursor: %\n", text_input_cursor);
+        if text_search_ui_open print(*builder, "search matches: %\n", search_results.matches.count);
+        if text_search_ui_open print(*builder, "case-insensitive: %\n", search_results.case_insensitive);
         // print(*builder, "mouse_from_top: %\n", rect.top - mouse.y);
         // print(*builder, "main_font_line_height: %\n", main_font.line_height);
 
@@ -606,13 +649,14 @@ draw_the_text_pane :: (rect: Rectangle) {
 
         h := main_font.line_height;
 
-        text_pad := 4;
-        pane_width_in_characters := (rect.width - text_pad) / main_font.mono_width;
+        text_x_tweak := 4.0;
+        pane_width_in_characters := (rect.width - text_x_tweak) / main_font.mono_width;
 
-        x := rect.left + text_pad;
+        x := rect.left + text_x_tweak;
         y := rect.top - h + scroll_rows * main_font.line_height;
         text_y_tweak := -(main_font.typical_descender + main_font.max_descender) / 2;
 
+        search_matches_cursor := 0;
         line_index := 0;
         while tail {
             defer line_index += 1;
@@ -638,6 +682,14 @@ draw_the_text_pane :: (rect: Rectangle) {
             if xx line.count <= scroll_columns
                 continue;
 
+            n_columns_to_skip := cast(int) floor(scroll_columns);
+            x_tweak := (scroll_columns - n_columns_to_skip) * main_font.mono_width;
+
+            // handle search match
+            if text_search_ui_open
+                // TODO @INCOMPLETE draw all matches, not just the first ones
+                draw_search_match_border(rect, main_font, text_x_tweak, y, line_index, *search_matches_cursor);
+
             info := *text_buffer_line_infos[line_index];
             color := text_color;
             if info.source_id != SOURCE_ID_UNKNOWN {
@@ -649,10 +701,8 @@ draw_the_text_pane :: (rect: Rectangle) {
                 font = main_font.bold;
             }
 
-            n_columns_to_skip := floor(scroll_columns);
-            x_tweak := (scroll_columns - n_columns_to_skip) * main_font.mono_width;
-            line = advance(line, xx n_columns_to_skip);
-            line.count = min(line.count, pane_width_in_characters);
+            line = advance(line, n_columns_to_skip);
+            line.count = min(line.count, xx pane_width_in_characters);
 
             w_text := Simp.prepare_text(font, line);
             // This fails for unicode!
@@ -665,6 +715,42 @@ draw_the_text_pane :: (rect: Rectangle) {
         }
 
     }
+
+}
+
+draw_search_match_border :: (parent_rect: Rectangle, font: My_Dynamic_Font, text_x_tweak: float, y: float, line_index: int, cursor: *int) {
+    search_match: *Search_Match_Info = null;
+
+    while cursor.* < search_results.matches.count {
+        it := *search_results.matches[cursor.*];
+        if it.line_index == line_index {
+            search_match = it;
+            break;
+        } else if it.line_index > line_index {
+            break;
+        }
+        cursor.* += 1;
+    }
+
+    if !search_match return;
+
+    // @ROBUSTNESS this global variable `scroll_columns` access is kinda ass
+    x_in_rect := font.mono_width * (search_match.offset_in_line - scroll_columns);
+    if x_in_rect > xx parent_rect.width return;
+
+    border_width := 2;
+
+    // @INCOMPLETE unicode not supported
+    w := search_results.search_string.count * font.mono_width + border_width * 2;
+    if x_in_rect + w < 0 return;
+
+    x := parent_rect.left + x_in_rect + text_x_tweak - border_width;
+    // @ROBUSTNESS this y_tweak is copy-pasted from anchors code
+    y_tweak := -border_width;
+    y_bottom := y + y_tweak;
+    h := font.line_height + border_width;
+    // @INCOMPLETE currently drawing outside `parent_rect` sometimes
+    draw_hollow_axis_aligned_rectangle(xx x, xx y_bottom, xx w, xx h, border = 2, search_match_color);
 
 }
 
@@ -726,10 +812,10 @@ load_text_buffer_data :: () {
     // text_buffer_data=, ok := read_entire_file(tprint("%/test.log", assets_directory));
     assert(ok);
 
-    array_reset(*text_buffer_all_log_sources);
+    array_reset_keeping_memory(*text_buffer_all_log_sources);
     array_reserve(*text_buffer_all_log_sources, SOURCE_ID_UNKNOWN);
-    array_reset(*text_buffer_line_infos);
-    array_reset(*log_ranges_of_source);
+    array_reset_keeping_memory(*text_buffer_line_infos);
+    array_reset_keeping_memory(*log_ranges_of_source);
 
     max_line_length := 0;
 
@@ -806,6 +892,197 @@ add_source :: (sources: *[..] string, source: string) -> u8 {
 
     array_add(sources, source);
     return xx (sources.count - 1);
+}
+
+//
+// text search stuff
+//
+
+Search_Results :: struct {
+    search_string_storage: [256] u8;
+    search_string: string;
+    case_insensitive := false;
+    matches: [..] Search_Match_Info;
+}
+
+Search_Match_Info :: struct {
+    line_index: s32;
+    offset_in_line: s16;
+}
+
+search_match_color :: #run hex_color("f5a511");
+
+search_results: Search_Results;
+
+update_text_buffer_search_results :: (search_string: string) {
+    assert(search_string.count < search_results.search_string_storage.count, "%", search_string.count);
+    memcpy(search_results.search_string_storage.data, search_string.data, search_string.count);
+    search_results.search_string_storage[search_string.count] = 0;
+    search_results.search_string.data = search_results.search_string_storage.data;
+    search_results.search_string.count = search_string.count;
+
+    array_reset_keeping_memory(*search_results.matches);
+    search_results.case_insensitive = false;
+
+    if !search_string return;
+
+    search_string_lowercase := to_lower_copy(search_string,, temp);
+    for search_string if is_alpha(it) { search_results.case_insensitive = true; break; }
+
+    for line_index: 0..text_buffer_line_infos.count - 2 {
+        info := text_buffer_line_infos[line_index];
+        next_info := text_buffer_line_infos[line_index + 1];
+        line_length := next_info.line_offset - info.line_offset - 1; // - 1 because there's a "\n"
+        line := slice(text_buffer_data, info.line_offset, line_length);
+
+        if !line continue;
+
+        offset := 0;
+        if search_results.case_insensitive then offset = search_for_match_case_insensitive(line, search_string_lowercase);
+                                           else offset = search_for_match_case_sensitive(line, search_string_lowercase);
+
+        if offset >= 0 {
+            assert(offset <= S16_MAX, "%", offset);
+            array_add(*search_results.matches, Search_Match_Info.{ xx line_index, xx offset });
+        }
+    }
+    // FIXME: ignoring the last line for now, cause i'm lazy
+}
+
+search_for_match_case_sensitive :: (line: string, search_string: string, $max_offset: int = S16_MAX, $do_assert := false) -> s64 {
+    first_char := search_string[0];
+    i := find_index_from_left(line, first_char);
+
+    if i < 0 || i >= max_offset return -1;
+
+    match_start, match_length := i, 1;
+    if match_length == search_string.count return match_start;
+
+    line_length_clamped := min(line.count, max_offset + 1);
+
+    i += 1;
+    while i < line.count {
+        if line[i] == search_string[match_length] {
+            match_length += 1;
+            if match_length == search_string.count return match_start;
+            i += 1;
+            continue;
+        }
+
+        match_length = 0;
+        // XXX: overlapping matches are not supported!!!
+        while (i < line_length_clamped) && (line[i] != search_string[match_length]) { i += 1; }
+        if i >= line_length_clamped return -1;
+
+        match_start, match_length = i, 1;
+        i += 1;
+    }
+
+    return -1;
+}
+
+search_for_match_case_insensitive :: (line: string, search_string: string, $max_offset: int = S16_MAX, $do_assert := false) -> s64 {
+    #if do_assert assert(is_lower(search_string));
+
+    first_char_lower := search_string[0];
+    i1 := inline find_index_from_left(line, first_char_lower);
+
+    i2 := -1;
+    if first_char_lower >= #char "a" && first_char_lower <= #char "z" {
+        first_char_upper := inline to_upper(first_char_lower);
+        i2 = inline find_index_from_left(line, first_char_upper);
+    }
+
+    i := 0;
+    if i1 < 0 || i1 >= max_offset {
+        if i2 < 0 || i2 >= max_offset return -1;   else i = i2;
+    } else {
+        if i2 < 0 || i2 >= max_offset then i = i1; else i = min(i1, i2);
+    }
+
+    match_start, match_length := i, 1;
+    if match_length == search_string.count return match_start;
+
+    line_length_clamped := min(line.count, max_offset + 1);
+
+    i += 1;
+    while i < line.count {
+        char := line[i];
+        if (inline to_lower(char)) == search_string[match_length] {
+            match_length += 1;
+            if match_length == search_string.count return match_start;
+            i += 1;
+            continue;
+        }
+
+        match_length = 0;
+        // XXX: overlapping matches are not supported!!!
+        while (i < line_length_clamped) && ((inline to_lower(line[i])) != search_string[match_length]) { i += 1; }
+        if i >= line_length_clamped return -1;
+
+        match_start, match_length = i, 1;
+        i += 1;
+    }
+
+    return -1;
+}
+
+test_search_for_match :: () {
+    line :: "aaabBbccCaAAadddAaAaAeEe";
+    i: int;
+    i = search_for_match_case_insensitive(line, "a",      do_assert=true); pretty_assert(i == 0);
+    i = search_for_match_case_insensitive(line, "aa",     do_assert=true); pretty_assert(i == 0);
+    i = search_for_match_case_insensitive(line, "aaa",    do_assert=true); pretty_assert(i == 0);
+    i = search_for_match_case_insensitive(line, "aaaa",   do_assert=true); pretty_assert(i == 9);
+    i = search_for_match_case_insensitive(line, "aaaaa",  do_assert=true); pretty_assert(i == 16);
+    i = search_for_match_case_insensitive(line, "aaaaaa", do_assert=true); pretty_assert(i == -1);
+
+    i = search_for_match_case_insensitive(line, "b",      do_assert=true); pretty_assert(i == 3);
+    i = search_for_match_case_insensitive(line, "bb",     do_assert=true); pretty_assert(i == 3);
+    i = search_for_match_case_insensitive(line, "bbb",    do_assert=true); pretty_assert(i == 3);
+
+    i = search_for_match_case_insensitive(line, "c",      do_assert=true); pretty_assert(i == 6);
+    i = search_for_match_case_insensitive(line, "cc",     do_assert=true); pretty_assert(i == 6);
+    i = search_for_match_case_insensitive(line, "ccc",    do_assert=true); pretty_assert(i == 6);
+
+    i = search_for_match_case_insensitive(line, "d",      do_assert=true); pretty_assert(i == 13);
+    i = search_for_match_case_insensitive(line, "dd",     do_assert=true); pretty_assert(i == 13);
+    i = search_for_match_case_insensitive(line, "ddd",    do_assert=true); pretty_assert(i == 13);
+
+    i = search_for_match_case_insensitive(line, "e",      do_assert=true); pretty_assert(i == 21);
+    i = search_for_match_case_insensitive(line, "ee",     do_assert=true); pretty_assert(i == 21);
+    i = search_for_match_case_insensitive(line, "eee",    do_assert=true); pretty_assert(i == 21);
+
+    i = search_for_match_case_sensitive(line, "a",      do_assert=true); pretty_assert(i == 0);
+    i = search_for_match_case_sensitive(line, "A",      do_assert=true); pretty_assert(i == 10);
+    i = search_for_match_case_sensitive(line, "aa",     do_assert=true); pretty_assert(i == 0);
+    i = search_for_match_case_sensitive(line, "aA",     do_assert=true); pretty_assert(i == 9);
+    i = search_for_match_case_sensitive(line, "Aa",     do_assert=true); pretty_assert(i == 11);
+    i = search_for_match_case_sensitive(line, "AA",     do_assert=true); pretty_assert(i == 10);
+    i = search_for_match_case_sensitive(line, "aaa",    do_assert=true); pretty_assert(i == 0);
+    i = search_for_match_case_sensitive(line, "aaA",    do_assert=true); pretty_assert(i == -1);
+    i = search_for_match_case_sensitive(line, "aAa",    do_assert=true); pretty_assert(i == 17);
+    i = search_for_match_case_sensitive(line, "aAA",    do_assert=true); pretty_assert(i == 9);
+    i = search_for_match_case_sensitive(line, "Aaa",    do_assert=true); pretty_assert(i == -1);
+    i = search_for_match_case_sensitive(line, "AaA",    do_assert=true); pretty_assert(i == 16);
+    i = search_for_match_case_sensitive(line, "AAa",    do_assert=true); pretty_assert(i == 10);
+    i = search_for_match_case_sensitive(line, "AAA",    do_assert=true); pretty_assert(i == -1);
+    i = search_for_match_case_sensitive(line, "aaaa",   do_assert=true); pretty_assert(i == -1);
+    i = search_for_match_case_sensitive(line, "aAAa",   do_assert=true); pretty_assert(i == 9);
+    i = search_for_match_case_sensitive(line, "AaAa",   do_assert=true); pretty_assert(i == 16);
+    i = search_for_match_case_sensitive(line, "aAaA",   do_assert=true); pretty_assert(i == 17);
+    i = search_for_match_case_sensitive(line, "AaaA",   do_assert=true); pretty_assert(i == -1);
+    i = search_for_match_case_sensitive(line, "aaaaa",  do_assert=true); pretty_assert(i == -1);
+    i = search_for_match_case_sensitive(line, "aaaaaa", do_assert=true); pretty_assert(i == -1);
+}
+
+a_to_A :: #char "A" - #char "a";
+A_to_a :: #char "a" - #char "A";
+
+other_case :: inline (char: u8) -> (char: u8, ok: bool) {
+    if      (char >= #char "a") && (char <= #char "z") return char - A_to_a, true;
+    else if (char >= #char "A") && (char <= #char "Z") return char + A_to_a, true;
+    else return char, false;
 }
 
 //
@@ -908,29 +1185,30 @@ text_search_ui_handle_input_event :: (event: Input.Event) {
         array_insert_at(*text_input_buffer, char, text_input_cursor);
         text_input_cursor += 1;
 
-        // TODO: live search update
+        update_text_buffer_search_results(xx text_input_buffer);
 
         redraw_needed = true;
     } else if event.key_code == {
         case .ESCAPE;
             close_text_search_ui();
             redraw_needed = true;
-            // TODO: live search update
 
         case .BACKSPACE;
             if text_input_cursor > 0 {
                 array_ordered_remove_range(*text_input_buffer, text_input_cursor - 1, text_input_cursor);
                 text_input_cursor -= 1;
                 redraw_needed = true;
+
+                update_text_buffer_search_results(xx text_input_buffer);
             }
-            // TODO: live search update
 
         case .DELETE;
             if text_input_buffer.count > 0 && text_input_cursor < text_input_buffer.count {
                 array_ordered_remove_range(*text_input_buffer, text_input_cursor, text_input_cursor + 1);
                 redraw_needed = true;
+
+                update_text_buffer_search_results(xx text_input_buffer);
             }
-            // TODO: live search update
 
         case .ARROW_LEFT;
             if text_input_cursor > 0 then text_input_cursor -= 1;
@@ -952,7 +1230,32 @@ text_search_ui_handle_input_event :: (event: Input.Event) {
             redraw_needed = true;
 
         case .ENTER;
-            // TODO: jump to next
+            forwards := !event.shift_pressed;
+            // TODO: @ROBUSTNESS this approach sucks, it's better to keep track
+            // of currently selected match and do everything based on it, could
+            // even highlight it some how
+            line_index := cast(int) floor(target_scroll_rows);
+
+            matched_line_index := -1;
+            if forwards {
+                for search_results.matches {
+                    if it.line_index > line_index {
+                        matched_line_index = it.line_index;
+                        break;
+                    }
+                }
+            } else {
+                for < search_results.matches {
+                    if it.line_index < line_index {
+                        matched_line_index = it.line_index;
+                        break;
+                    }
+                }
+            }
+
+            if matched_line_index >= 0 {
+                target_scroll_rows = xx matched_line_index;
+            }
     }
 }
 
@@ -1292,6 +1595,11 @@ last :: (array: [] $T) -> T #expand {
     return array[array.count - 1];
 }
 
+is_lower :: (s: string) -> bool {
+    for s if (it < #char "a") || (it > #char "z") return false;
+    return true;
+}
+
 fmt :: (v: float64, trailing_width := 1) -> FormatFloat #expand {
     return FormatFloat.{ value = v, trailing_width = trailing_width, zero_removal = .NO };
 }
@@ -1310,6 +1618,90 @@ Profile :: (format: string = "", args: ..Any, loc := #caller_location) #expand {
     }
     `profile_t0 = t1;
 } @PrintLike
+
+//
+// pretty assert
+//
+
+// Constant structs don't work with compile time constructs yet, so we return
+// all fields directly
+get_expr_info :: (code: Code) -> kind: Code_Node.Kind, op_type: s32, full_expr: string, proc_expr: string, lhs: Code, rhs: Code {
+    #import "Program_Print";
+
+    root := compiler_get_nodes(code);
+
+    builder: String_Builder;
+    print_expression(*builder, root);
+    full_expr := builder_to_string(*builder);
+
+    if root.kind == {
+        case .BINARY_OPERATOR;
+            binop := cast(*Code_Binary_Operator) root;
+            op_type := binop.operator_type;
+            lhs := compiler_get_code(binop.left, code);
+            rhs := compiler_get_code(binop.right, code);
+            return xx root.kind, op_type, full_expr, "", lhs, rhs;
+
+        case .PROCEDURE_CALL;
+            proccall := cast(*Code_Procedure_Call) root;
+            if proccall.arguments_sorted.count != 2 {
+                dummy : Code = #code null;
+                return xx root.kind, -1, full_expr, "", dummy, dummy;
+            }
+
+            builder: String_Builder;
+            print_expression(*builder, proccall.procedure_expression);
+            proc_expr := builder_to_string(*builder);
+
+            lhs := compiler_get_code(proccall.arguments_sorted[0], code);
+            rhs := compiler_get_code(proccall.arguments_sorted[1], code);
+            return xx root.kind, -1, full_expr, proc_expr, lhs, rhs;
+
+        case;
+
+    }
+
+    dummy : Code = #code null;
+    return xx root.kind, -1, full_expr, "", dummy, dummy;
+}
+
+pretty_assert :: (code: Code, loc := #caller_location) #expand {
+    if #insert code return;
+
+    if context.handling_assertion_failure  return;  // Avoid infinite loops.
+    context.handling_assertion_failure = true;
+
+    kind, op_type, full_expr, proc_expr, lhs, rhs :: #run get_expr_info(code);
+
+    message := "";
+
+    #if kind == .BINARY_OPERATOR {
+        builder : String_Builder;
+        builder.allocator = temporary_allocator;
+
+        print_to_builder(*builder, "(%) = (% ", full_expr, #insert lhs);
+
+        if op_type < 128 {
+            append(*builder, cast(u8) op_type);
+        } else {
+            append(*builder, operator_to_string(xx op_type));
+        }
+
+        print_to_builder(*builder, " %) = false", #insert rhs);
+        message = builder_to_string(*builder,, temporary_allocator);
+    } else #if kind == .PROCEDURE_CALL {
+        message = tprint("(%) = (%(%, %)) = false", full_expr, proc_expr, #insert lhs, #insert rhs);
+    } else {
+        message = tprint("(%) = false", full_expr);
+    }
+
+    // We provide 'loc' in case _STACK_TRACE is turned off, but assertion_failed may well
+    // look at the stack trace if it is available.
+    context.assertion_failed(loc, message);
+    debug_break();
+    context.handling_assertion_failure = false;
+
+} @NoProfile
 
 //
 // footer
