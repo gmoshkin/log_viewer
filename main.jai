@@ -98,8 +98,11 @@ left_column_rect: Rectangle;
 scroll_rows := 0.0;
 target_scroll_rows := 0.0;
 scroll_rows_lerp_factor := 0.5;
-scroll_columns := 0.0;
 scroll_rows_at_click := 0.0;
+
+scroll_columns := 0.0;
+target_scroll_columns := 0.0;
+scroll_columns_lerp_factor := 0.5;
 
 draggin_scroll_bar := false;
 scroll_bar_rect: Rectangle;
@@ -107,6 +110,7 @@ scroll_bar_pad := 1;
 scroll_bar_slider_color := #run hex_color("d0d0d0");
 scroll_bar_anchor_min_width := 1.7;
 scroll_bar_effective_slider_color := #run hex_color("b0b0b0");
+scroll_bar_anchor_hover_color := #run hex_color("e0e0e0");
 
 anchor_button_active_color  := #run hex_color("4050d0");
 anchor_button_hover_color   := #run hex_color("404040");
@@ -268,13 +272,12 @@ update_and_draw_frame :: () -> bool {
         else if it.type == .MOUSE_WHEEL && modifiers == .SHIFT && !draggin_scroll_bar {
             ofs := it.wheel_delta / cast(float) it.typical_wheel_delta;
 
-            scroll_columns += -ofs * 8;
-            scroll_columns = max(scroll_columns, 0);
+            target_scroll_columns += -ofs * 8;
+            target_scroll_columns = max(target_scroll_columns, 0);
             request_redraw(tprint("scroll at %", #line));
         }
 
         else if it.type == .MOUSE_WHEEL && !modifiers && !draggin_scroll_bar {
-            target_scroll_rows = scroll_rows;
             target_scroll_rows += -3 * it.wheel_delta / cast(float) it.typical_wheel_delta;
             target_scroll_rows = clamp(target_scroll_rows, -text_pane_row_count / 2.0, total_line_count - text_pane_row_count / 2.0);
             request_redraw(tprint("scroll at %", #line));
@@ -287,33 +290,31 @@ update_and_draw_frame :: () -> bool {
         }
 
         else if it.key_pressed && it.key_code == .PAGE_UP {
-            target_scroll_rows = scroll_rows;
             target_scroll_rows += -text_pane_row_count;
             target_scroll_rows = clamp(target_scroll_rows, -text_pane_row_count / 2.0, total_line_count - text_pane_row_count / 2.0);
-            request_redraw(tprint("scroll at %", #line));
         } else if it.key_pressed && it.key_code == .PAGE_DOWN {
-            target_scroll_rows = scroll_rows;
             target_scroll_rows += text_pane_row_count;
             target_scroll_rows = clamp(target_scroll_rows, -text_pane_row_count / 2.0, total_line_count - text_pane_row_count / 2.0);
-            request_redraw(tprint("scroll at %", #line));
         } else if it.key_pressed && it.key_code == .ARROW_UP {
-            target_scroll_rows = scroll_rows;
-            target_scroll_rows += -1;
+            target_scroll_rows += -(ifx it.shift_pressed then 10 else 1);
             target_scroll_rows = clamp(target_scroll_rows, -text_pane_row_count / 2.0, total_line_count - text_pane_row_count / 2.0);
-            request_redraw(tprint("scroll at %", #line));
         } else if it.key_pressed && it.key_code == .ARROW_DOWN {
-            target_scroll_rows = scroll_rows;
-            target_scroll_rows += 1;
+            target_scroll_rows += (ifx it.shift_pressed then 10 else 1);
             target_scroll_rows = clamp(target_scroll_rows, -text_pane_row_count / 2.0, total_line_count - text_pane_row_count / 2.0);
-            request_redraw(tprint("scroll at %", #line));
-        } else if it.key_pressed && it.key_code == .HOME && it.ctrl_pressed {
-            target_scroll_rows = scroll_rows;
-            target_scroll_rows = 0;
-            request_redraw(tprint("scroll at %", #line));
+        } else if it.key_pressed && it.key_code == .ARROW_LEFT {
+            target_scroll_columns += -(ifx it.shift_pressed then 10 else 1);
+            target_scroll_columns = max(target_scroll_columns, 0);
+        } else if it.key_pressed && it.key_code == .ARROW_RIGHT {
+            target_scroll_columns += (ifx it.shift_pressed then 10 else 1);
+            target_scroll_columns = max(target_scroll_columns, 0);
+        } else if it.key_pressed && it.key_code == .HOME {
+            if it.ctrl_pressed {
+                target_scroll_rows = 0;
+            } else {
+                target_scroll_columns = 0;
+            }
         } else if it.key_pressed && it.key_code == .END && it.ctrl_pressed {
-            target_scroll_rows = scroll_rows;
             target_scroll_rows = total_line_count - text_pane_row_count / 2.0;
-            request_redraw(tprint("scroll at %", #line));
         }
 
 
@@ -322,11 +323,13 @@ update_and_draw_frame :: () -> bool {
         }
     }
 
-    // update scroll bar
+    // update vertical scroll
     scroll_rows = lerp(scroll_rows, target_scroll_rows, scroll_rows_lerp_factor);
-    if abs(scroll_rows - target_scroll_rows) < 0.0001 {
-        scroll_rows = target_scroll_rows;
-    }
+    if abs(scroll_rows - target_scroll_rows) < 0.001 then scroll_rows = target_scroll_rows;
+
+    // update horizontal scroll
+    scroll_columns = lerp(scroll_columns, target_scroll_columns, scroll_columns_lerp_factor);
+    if abs(scroll_columns - target_scroll_columns) < 0.001 then scroll_columns = target_scroll_columns;
 
     //
     // drag scroll bar
@@ -388,7 +391,7 @@ update_and_draw_frame :: () -> bool {
         anchor_kind := hovered_scroll_bar_anchor_kind;
         // I'm not actually sure this is needed...
         mouse_in_rect := mouse - .{xx scroll_bar_rect.left, xx bottom(scroll_bar_rect)};
-        anchor_index := do_scroll_bar_anchors(scroll_bar_rect, explicit_anchors, anchor_button_active_color, .GET_HOVER, mouse_in_rect);
+        anchor_index := do_scroll_bar_anchors(scroll_bar_rect, explicit_anchors, anchor_button_active_color, .GET_HOVER, mouse_in_rect, t=15);
         if anchor_index != -1 {
             anchor_kind = .EXPLICIT;
         } else {
@@ -420,12 +423,12 @@ update_and_draw_frame :: () -> bool {
     }
 
     ////////////////////////////////////////////////////////////////////////////
-    // TEMPORARY!!!
+    // @TEMPORARY!!!
     if mouse_last_frame != mouse {
         request_redraw("mouse moved");
     }
-    if target_scroll_rows != scroll_rows {
-        request_redraw(tprint("scroll animation %", target_scroll_rows - scroll_rows));
+    if target_scroll_rows != scroll_rows || target_scroll_columns != scroll_columns {
+        request_redraw(tprint("scroll animation %, %", target_scroll_columns - scroll_columns, target_scroll_rows - scroll_rows));
     }
 
     if !Input.input_application_has_focus return should_quit;
@@ -562,17 +565,27 @@ update_and_draw_frame :: () -> bool {
         }
 
         // draw scroll bar anchors
-        mouse_in_rect := mouse - .{xx scroll_bar_rect.left, xx bottom(scroll_bar_rect)};
-        do_scroll_bar_anchors(scroll_bar_rect, search_results.matches, search_match_color, .DRAW, mouse_in_rect);
-        // explicit anchors have higher priority
-        do_scroll_bar_anchors(scroll_bar_rect, explicit_anchors, anchor_button_active_color, .DRAW, mouse_in_rect);
+        {
+            mouse_in_rect := mouse - .{xx scroll_bar_rect.left, xx bottom(scroll_bar_rect)};
+            search_match_index := do_scroll_bar_anchors(scroll_bar_rect, search_results.matches, search_match_color, .DRAW, mouse_in_rect);
+            // explicit anchors have higher priority
+            explicit_anchor_index := do_scroll_bar_anchors(scroll_bar_rect, explicit_anchors, anchor_button_active_color, .DRAW, mouse_in_rect, t=15);
+            if explicit_anchor_index != -1 {
+                line_index := explicit_anchors[explicit_anchor_index].line_index;
+                draw_single_scroll_bar_anchor(scroll_bar_rect, line_index, anchor_button_active_color, hover=true, t=15);
+            } else if search_match_index != -1 {
+                match := search_results.matches[search_match_index];
+                color := get_log_source_color(match.source_id);
+                draw_single_scroll_bar_anchor(scroll_bar_rect, match.line_index, color, hover=true);
+            }
+        }
 
         if text_search_ui_open {
             draw_text_search_ui(text_search_ui_rect, main_font);
         }
     }
 
-    // debuggin
+    // debuggin pane
     {
         rect := window_rect;
         font := debug_font;
@@ -587,7 +600,8 @@ update_and_draw_frame :: () -> bool {
         // print(*builder, "num ranges: %\n", log_ranges_of_source.count);
         if text_search_ui_open print(*builder, "cursor: %\n", text_input_cursor);
         if text_search_ui_open print(*builder, "search matches: %\n", search_results.matches.count);
-        if text_search_ui_open print(*builder, "case-insensitive: %\n", search_results.case_insensitive);
+        if hovered_scroll_bar_anchor_index != -1 then print(*builder, "% %\n", hovered_scroll_bar_anchor_kind, hovered_scroll_bar_anchor_index);
+        // if text_search_ui_open print(*builder, "case-insensitive: %\n", search_results.case_insensitive);
         for redraw_reasons print(*builder, "%\n", it);
         // print(*builder, "mouse_from_top: %\n", rect.top - mouse.y);
         // print(*builder, "main_font_line_height: %\n", main_font.line_height);
@@ -595,6 +609,18 @@ update_and_draw_frame :: () -> bool {
         pane_text := builder_to_string(*builder,, temp);
         draw_simple_text_pane(rect, font, x, y, pane_text, hex_color("ffffff"), hex_color("181818"));
     }
+
+    // // @TEMPORARY
+    // {
+    //     p0 := Vector2.{left(window_rect) + width(window_rect) * .27, top(window_rect) - height(window_rect) * .2};
+    //     p1 := Vector2.{left(window_rect) + width(window_rect) * .27, bottom(window_rect) + height(window_rect) * .2};
+    //     p2 := Vector2.{right(window_rect) - width(window_rect) * .27, bottom(window_rect) + height(window_rect) * .5};
+    //     color := hex_color("808080");
+    //     if triangle_contains(p0, p1, p2, mouse) {
+    //         color = color_red;
+    //     }
+    //     draw_triangle(p0, p1, p2, color);
+    // }
 
     Simp.swap_buffers(window);
     Profile();
@@ -607,55 +633,83 @@ update_and_draw_frame :: () -> bool {
 // scroll bar stuff
 //
 
-do_scroll_bar_anchors :: (parent_rect: Rectangle, anchors: [] $T, color: Vector4, $mode: enum { DRAW; GET_HOVER; }, target_in_rect: Vector2, do_hover := true) -> (index: s64) {
+do_scroll_bar_anchors :: (parent_rect: Rectangle, anchors: [] $T, color: Vector4, $mode: enum { DRAW; GET_HOVER; }, target_in_rect: Vector2, $$t := 10.0) -> (index: s64) {
     target := target_in_rect;
-    hover_color := hex_color("e0e0e0");
+    hover_color := scroll_bar_anchor_hover_color;
+    color_ := color;
 
-    do_hover_ := (mode == .GET_HOVER) || do_hover;
+    hover_indexes: [..] int;
+    hover_indexes.allocator = temp;
+    array_reserve(*hover_indexes, 16);
 
-    active_anchor_triangle_size := 10.0;
-    triangle_middle_x_tweak := 2.0;
-    triangle_corner_x_tweak := active_anchor_triangle_size;
-    triangle_corner_y_tweak := active_anchor_triangle_size / 2;
-
-    hover_index := -1;
-
-    pixels_on_scroll_bar_per_text_line := parent_rect.height / cast(float) text_buffer_line_infos.count;
-    x := parent_rect.left;
-    w := parent_rect.width;
-    h := cast(float) max(scroll_bar_anchor_min_width, pixels_on_scroll_bar_per_text_line);
-    slack := 1.2;
+    x, effective_h, w, h := scroll_bar_anchor_parameters(parent_rect, text_buffer_line_infos.count);
+    slack :: 1.2;
     for anchors {
-        y := parent_rect.top - (it.line_index + 1) * pixels_on_scroll_bar_per_text_line;
+        y := parent_rect.top - (it.line_index + 1) * effective_h;
 
-        hover := do_hover_ && (target.x >= -triangle_corner_x_tweak && target.x <= xx parent_rect.width && target.y >= y - slack && target.y <= y + h + slack);
+        hover := (target.x >= -t && target.x <= xx parent_rect.width && target.y >= y - slack && target.y <= y + h + slack);
 
         #if #complete mode == {
         case .DRAW;
-            if hover {
-                draw_axis_aligned_rectangle(xx x, y - 1, xx w, 1, hover_color);
-                draw_axis_aligned_rectangle(xx x, y + h, xx w, 1, hover_color);
-                hover_index = it_index;
-            }
-            draw_axis_aligned_rectangle(xx x, y, xx w, h, color);
-            {
-                Y := y + h / 2;
-                p0 := Vector2.{ x - triangle_middle_x_tweak, Y };
-                p1 := Vector2.{ x - triangle_corner_x_tweak, Y - triangle_corner_y_tweak };
-                p2 := Vector2.{ x - triangle_corner_x_tweak, Y + triangle_corner_y_tweak };
-                if hover {
-                    draw_triangle(p0 + .{ 2, 0 }, p1 + .{ -1.333333, -2 }, p2 + .{ -1.333333, 2 }, hover_color);
-                }
-                draw_triangle(p0, p1, p2, color);
-            }
+            #if T == Search_Match_Info then color_ = get_log_source_color(it.source_id);
+            inline draw_scroll_bar_anchor(x, y, w, h, t, color_, false);
+            if hover then array_add(*hover_indexes, it_index);
 
         case .GET_HOVER;
-            if hover return it_index;
+            if hover {
+                array_add(*hover_indexes, it_index);
+            } else if hover_indexes {
+                // not hovering anymore, but had some hovers, which means we're
+                // past the hovered ones. I speak not good
+                return hover_indexes[hover_indexes.count / 2];
+            }
         }
     }
 
-    return hover_index;
+    if !hover_indexes return -1;
+    // return the middle one
+    return hover_indexes[hover_indexes.count / 2];
 }
+
+draw_single_scroll_bar_anchor :: (parent_rect: Rectangle, line_index: int, color: Vector4, $$t := 10.0, hover: bool) {
+    x, effective_h, w, h := scroll_bar_anchor_parameters(parent_rect, text_buffer_line_infos.count);
+    y := parent_rect.top - (line_index + 1) * effective_h;
+
+    inline draw_scroll_bar_anchor(x, y, w, h, t, color, hover);
+}
+
+scroll_bar_anchor_parameters :: (parent_rect: Rectangle, max_count: int) -> (x: float, effective_h: float, w: float, h: float) {
+    effective_h := parent_rect.height / cast(float) max_count;
+    x := cast(float) parent_rect.left;
+    w := cast(float) parent_rect.width;
+    h := cast(float) max(scroll_bar_anchor_min_width, effective_h);
+
+    return x, effective_h, w, h;
+}
+
+draw_scroll_bar_anchor :: (x: float, y: float, w: float, h: float, $$t: float, color: Vector4, hover: bool) {
+    hover_color := scroll_bar_anchor_hover_color;
+
+    triangle_middle_x_tweak :: 2.0;
+
+    if hover {
+        draw_axis_aligned_rectangle(x, y - 1, xx w, 1, hover_color);
+        draw_axis_aligned_rectangle(x, y + h, xx w, 1, hover_color);
+    }
+    draw_axis_aligned_rectangle(xx x, y, xx w, h, color);
+    {
+        Y := y + h / 2;
+        p0 := Vector2.{x - triangle_middle_x_tweak, Y};
+        p1 := p0 + .{triangle_middle_x_tweak - t, -t/2};
+        p2 := p0 + .{triangle_middle_x_tweak - t,  t/2};
+        if hover {
+            draw_triangle(p0 + .{ 2, 0 }, p1 + .{ -1.333333, -2 }, p2 + .{ -1.333333, 2 }, hover_color);
+        }
+        draw_triangle(p0, p1, p2, color);
+    }
+
+}
+
 
 //
 // text pane stuff
@@ -714,39 +768,39 @@ draw_the_text_pane :: (rect: Rectangle) {
                 draw_axis_aligned_rectangle(xx x, xx y_top,    xx w, 2, anchor_line_highlight_color);
             }
 
-            if xx line.count <= scroll_columns
-                continue;
-
             n_columns_to_skip := cast(int) floor(scroll_columns);
             x_tweak := (scroll_columns - n_columns_to_skip) * main_font.mono_width;
+
+            if xx line.count > scroll_columns {
+                info := *text_buffer_line_infos[line_index];
+                color := text_color;
+                if info.source_id != SOURCE_ID_UNKNOWN {
+                    color = get_log_source_color(info.source_id);
+                }
+
+                font := main_font.regular;
+                if line_index == hover_line_index {
+                    font = main_font.bold;
+                }
+
+                line = advance(line, n_columns_to_skip);
+                line.count = min(line.count, xx pane_width_in_characters);
+
+                w_text := Simp.prepare_text(font, line);
+                // This fails for unicode!
+                // assert(w_text == main_font.mono_width * line.count);
+
+                // if line_index % 2 == 0
+                //     draw_axis_aligned_rectangle(xx x, xx y, xx rect.width, xx main_font.line_height, hex_color("005050"));
+
+                Simp.draw_prepared_text(font, xx (x - x_tweak), xx y + text_y_tweak, color);
+            }
 
             // handle search match
             if text_search_ui_open
                 // TODO @INCOMPLETE draw all matches, not just the first ones
                 draw_search_match_border(rect, main_font, text_x_tweak, y, line_index, *search_matches_cursor);
 
-            info := *text_buffer_line_infos[line_index];
-            color := text_color;
-            if info.source_id != SOURCE_ID_UNKNOWN {
-                color = get_log_source_color(info.source_id);
-            }
-
-            font := main_font.regular;
-            if line_index == hover_line_index {
-                font = main_font.bold;
-            }
-
-            line = advance(line, n_columns_to_skip);
-            line.count = min(line.count, xx pane_width_in_characters);
-
-            w_text := Simp.prepare_text(font, line);
-            // This fails for unicode!
-            // assert(w_text == main_font.mono_width * line.count);
-
-            // if line_index % 2 == 0
-            //     draw_axis_aligned_rectangle(xx x, xx y, xx rect.width, xx main_font.line_height, hex_color("005050"));
-
-            Simp.draw_prepared_text(font, xx (x - x_tweak), xx y + text_y_tweak, color);
         }
 
     }
@@ -755,6 +809,7 @@ draw_the_text_pane :: (rect: Rectangle) {
 
 draw_search_match_border :: (parent_rect: Rectangle, font: My_Dynamic_Font, text_x_tweak: float, y: float, line_index: int, cursor: *int) {
     search_match: *Search_Match_Info = null;
+    color := search_match_color;
 
     while cursor.* < search_results.matches.count {
         it := *search_results.matches[cursor.*];
@@ -769,23 +824,39 @@ draw_search_match_border :: (parent_rect: Rectangle, font: My_Dynamic_Font, text
 
     if !search_match return;
 
-    // @ROBUSTNESS this global variable `scroll_columns` access is kinda ass
-    x_in_rect := font.mono_width * (search_match.offset_in_line - scroll_columns);
-    if x_in_rect > xx parent_rect.width return;
+    border_width := 2.0;
 
-    border_width := 2;
-
-    // @INCOMPLETE unicode not supported
-    w := search_results.search_string.count * font.mono_width + border_width * 2;
-    if x_in_rect + w < 0 return;
-
-    x := parent_rect.left + x_in_rect + text_x_tweak - border_width;
     // @ROBUSTNESS this y_tweak is copy-pasted from anchors code
     y_tweak := -border_width;
     y_bottom := y + y_tweak;
     h := font.line_height + border_width;
+    h23 := 2 * h / 5;
+
+    // @ROBUSTNESS this global variable `scroll_columns` access is kinda ass
+    x_in_rect := font.mono_width * (search_match.offset_in_line - scroll_columns) + text_x_tweak - border_width;
+    if x_in_rect > xx parent_rect.width {
+        p0 := Vector2.{xx right(parent_rect), y_bottom + h/2};
+        p1 := p0 + .{-h23, -h23};
+        p2 := p0 + .{-h23,  h23};
+        draw_fat_line(p0, p1, border_width, color);
+        draw_fat_line(p0, p2, border_width, color);
+        return;
+    }
+
+    // @INCOMPLETE unicode not supported
+    w := search_results.search_string.count * font.mono_width + border_width * 2;
+    if x_in_rect + w < 0 {
+        p0 := Vector2.{xx parent_rect.left, y_bottom + h/2};
+        p1 := p0 + .{h23, -h23};
+        p2 := p0 + .{h23,  h23};
+        draw_fat_line(p0, p1, border_width, color);
+        draw_fat_line(p0, p2, border_width, color);
+        return;
+    }
+
+    x := parent_rect.left + x_in_rect;
     // @INCOMPLETE currently drawing outside `parent_rect` sometimes
-    draw_hollow_axis_aligned_rectangle(xx x, xx y_bottom, xx w, xx h, border = 2, search_match_color);
+    draw_hollow_axis_aligned_rectangle(xx x, xx y_bottom, xx w, xx h, border = 2, color);
 
 }
 
@@ -839,7 +910,7 @@ Log_Range :: struct {
 }
 log_ranges_of_source: [..] Log_Range;
 
-SOURCE_ID_UNKNOWN :: 0xff;
+SOURCE_ID_UNKNOWN :: cast(u8) 0xff;
 
 load_text_buffer_data :: () {
     text_buffer_data=, ok := read_entire_file(tprint("%/sample_log.txt", assets_directory));
@@ -943,6 +1014,7 @@ Search_Results :: struct {
 Search_Match_Info :: struct {
     line_index: s32;
     offset_in_line: s16;
+    source_id: u8 = SOURCE_ID_UNKNOWN;
 }
 
 search_match_color :: #run hex_color("f5a511");
@@ -964,6 +1036,8 @@ update_text_buffer_search_results :: (search_string: string) {
     search_string_lowercase := to_lower_copy(search_string,, temp);
     for search_string if is_alpha(it) { search_results.case_insensitive = true; break; }
 
+    next_range_cursor := 0;
+
     for line_index: 0..text_buffer_line_infos.count - 2 {
         info := text_buffer_line_infos[line_index];
         next_info := text_buffer_line_infos[line_index + 1];
@@ -976,9 +1050,19 @@ update_text_buffer_search_results :: (search_string: string) {
         if search_results.case_insensitive then offset = search_for_match_case_insensitive(line, search_string_lowercase);
                                            else offset = search_for_match_case_sensitive(line, search_string_lowercase);
 
+        source_id := SOURCE_ID_UNKNOWN;
+        while next_range_cursor < log_ranges_of_source.count {
+            if log_ranges_of_source[next_range_cursor].start_index > line_index break;
+            next_range_cursor += 1;
+        }
+        assert(next_range_cursor > 0);
+        range_info := log_ranges_of_source[next_range_cursor - 1];
+        assert(range_info.start_index <= line_index);
+        source_id = range_info.source_id;
+
         if offset >= 0 {
             assert(offset <= S16_MAX, "%", offset);
-            array_add(*search_results.matches, Search_Match_Info.{ xx line_index, xx offset });
+            array_add(*search_results.matches, Search_Match_Info.{ xx line_index, xx offset, source_id });
         }
     }
     // FIXME: ignoring the last line for now, cause i'm lazy
@@ -1374,8 +1458,12 @@ Rectangle :: struct {
     height: s32;
 }
 
+top    :: (rect: Rectangle) -> s32 #expand { return rect.top;               }
 bottom :: (rect: Rectangle) -> s32 #expand { return rect.top - rect.height; }
+left   :: (rect: Rectangle) -> s32 #expand { return rect.left;              }
 right  :: (rect: Rectangle) -> s32 #expand { return rect.left + rect.width; }
+width  :: (rect: Rectangle) -> s32 #expand { return rect.width;             }
+height :: (rect: Rectangle) -> s32 #expand { return rect.height;            }
 
 draw_axis_aligned_rectangle :: (p0: Vector2, p1: Vector2, color: Vector4) {
     Simp.immediate_quad(p0, .{ p0.x, p1.y }, p1, .{ p1.x, p0.y }, color, color, color, color);
@@ -1439,6 +1527,22 @@ axis_aligned_rectangle_contains :: (left: float, bottom: float, width: float, he
     if bottom > point.y          return false;
     if bottom + height < point.y return false;
     return true;
+}
+
+// source: https://stackoverflow.com/a/2049593
+triangle_contains :: (p0: Vector2, p1: Vector2, p2: Vector2, target: Vector2) -> bool {
+    sign :: (p0: Vector2, p1: Vector2, p2: Vector2) -> float #expand {
+        return (p0.x - p2.x) * (p1.y - p2.y) - (p1.x - p2.x) * (p0.y - p2.y);
+    }
+
+    d0 := sign(target, p0, p1);
+    d1 := sign(target, p1, p2);
+    d2 := sign(target, p2, p0);
+
+    has_neg := (d0 < 0) || (d1 < 0) || (d2 < 0);
+    has_pos := (d0 > 0) || (d1 > 0) || (d2 > 0);
+
+    return !(has_neg && has_pos);
 }
 
 //
