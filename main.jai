@@ -23,6 +23,9 @@ main :: () {
     context.logger = my_logger;
     context.print_style.struct_printer = my_struct_printer;
 
+    log("working directory: '%'", get_working_directory());
+    parse_command_line_arguments();
+
     #if OS == .WINDOWS {
         // In order to have a hope of waiting a reasonable amount of time,
         // we need to do this stupid thing. Probably we should use CreateWaitableTimer
@@ -918,9 +921,11 @@ log_ranges_of_source: [..] Log_Range;
 SOURCE_ID_UNKNOWN :: cast(u8) 0xff;
 
 load_text_buffer_data :: () {
-    text_buffer_data=, ok := read_entire_file(tprint("%/sample_log.txt", assets_directory));
-    // text_buffer_data=, ok := read_entire_file("main.jai");
-    // text_buffer_data=, ok := read_entire_file(tprint("%/test.log", assets_directory));
+    file_path := input_file_full_path;
+    if !input_file_full_path {
+        file_path = tprint("%/sample_log.txt", assets_directory);
+    }
+    text_buffer_data=, ok := read_entire_file(file_path);
     assert(ok);
 
     array_reset_keeping_memory(*text_buffer_all_log_sources);
@@ -1572,6 +1577,44 @@ key_is_down :: ($char: string) -> bool #expand {
 }
 
 //
+// command line arguments
+//
+
+input_file_full_path: string;
+
+parse_command_line_arguments :: () {
+    args := get_command_line_arguments();
+
+    working_directory := get_working_directory();
+    working_directory_path := parse_path(working_directory);
+
+    cursor := 1;
+    while cursor < args.count {
+        arg := args[cursor];
+
+        // TODO: handle optional flags
+
+        break;
+    }
+
+    if cursor < args.count {
+        arg := args[cursor];
+        input_file_full_path = sprint("%/%", working_directory, arg);
+        cursor += 1;
+    }
+
+    if cursor != args.count {
+        while cursor < args.count {
+            arg := args[cursor];
+            log_error("unexpected argument '%'", arg);
+            cursor += 1;
+        }
+        exit(1);
+    }
+
+}
+
+//
 // logging
 //
 
@@ -1871,3 +1914,4 @@ Simp :: #import "Simp";
 System :: #import "System";
 #import "Hash_Table";
 #import "File";
+#import "File_Utilities";
