@@ -127,8 +127,6 @@ hovered_anchor_button_line: s64 = -1;
 hovered_scroll_bar_anchor_kind: enum { EXPLICIT; SEARCH_MATCH; };
 hovered_scroll_bar_anchor_index: s64 = -1;
 
-color_red := #run hex_color("e04020");
-
 //
 // main update and draw proc
 //
@@ -894,21 +892,36 @@ Log_Line_Info :: struct {
     // TODO: timestamp
 }
 
+color_red :: #run hex_color("db0011");
+color_green :: #run hex_color("00c52c");
+color_blue :: #run hex_color("0069cb");
+color_coral :: #run hex_color("ff8080");
+color_yellow :: #run hex_color("ffdf00");
+color_cyan :: #run hex_color("208c73");
+color_magenta :: #run hex_color("cd00b7");
+color_orange :: #run hex_color("ff6b00");
+color_baby_blue :: #run hex_color("6bc8f2");
+color_purple :: #run hex_color("a000ff");
+color_white :: #run hex_color("ffffff");
+color_brown :: #run hex_color("973f00");
+
 log_source_color_scheme := Vector4.[
-    #run hex_color("db0011"), // red
-    #run hex_color("00c52c"), // green
-    #run hex_color("0069cb"), // blue
-    #run hex_color("ff8080"), // coral-ish
-    #run hex_color("ffdf00"), // yellow
-    #run hex_color("cd00b7"), // magenta
-    #run hex_color("00d8db"), // baby blue
-    #run hex_color("ff6b00"), // orange
-    #run hex_color("a000ff"), // purple
-    #run hex_color("ffffff"), // white
-    #run hex_color("973f00"), // brown
+    color_red,
+    color_green,
+    color_blue,
+    color_coral,
+    color_yellow,
+    color_cyan,
+    color_magenta,
+    color_orange,
+    color_baby_blue,
+    color_purple,
+    color_white,
+    color_brown,
 ];
 
 get_log_source_color :: (source_id: u8) -> Vector4 #expand {
+    if source_id == SOURCE_ID_UNKNOWN return main_text_pane_text_color;
     return log_source_color_scheme[source_id % log_source_color_scheme.count];
 }
 
