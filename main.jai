@@ -647,7 +647,8 @@ do_scroll_bar_anchors :: (parent_rect: Rectangle, anchors: [] $T, color: Vector4
     for anchors {
         y := parent_rect.top - (it.line_index + 1) * effective_h;
 
-        p0, p1, p2 := get_scroll_bar_triangle(t, y + h / 2);
+        // I hate how complicated this got       v this fucking zero ToT
+        p0, p1, p2 := get_scroll_bar_triangle(t, 0, y + h / 2);
         hover := triangle_contains(p0, p1, p2, target) || (target.x >= 0 && target.x <= xx parent_rect.width && target.y >= y - slack && target.y <= y + h + slack);
 
         #if #complete mode == {
@@ -699,8 +700,7 @@ draw_scroll_bar_anchor :: (x: float, y: float, w: float, h: float, $$t: float, c
     draw_axis_aligned_rectangle(xx x, y, xx w, h, color);
     {
         Y := y + h / 2;
-        // FIXME @BROKEN!!!! I'm sleepy and I broke this!!!!
-        p0, p1, p2 := get_scroll_bar_triangle(t, Y);
+        p0, p1, p2 := get_scroll_bar_triangle(t, x, Y);
         if hover {
             draw_triangle(p0 + .{ 2, 0 }, p1 + .{ -1.333333, -2 }, p2 + .{ -1.333333, 2 }, hover_color);
         }
@@ -709,8 +709,8 @@ draw_scroll_bar_anchor :: (x: float, y: float, w: float, h: float, $$t: float, c
 
 }
 
-get_scroll_bar_triangle :: ($$t: float, y: float, $x_tweak := 2.0) -> (Vector2, Vector2, Vector2) #expand {
-    p0 := Vector2.{-x_tweak, y};
+get_scroll_bar_triangle :: ($$t: float, x: float, y: float, $x_tweak := 2.0) -> (Vector2, Vector2, Vector2) #expand {
+    p0 := Vector2.{x - x_tweak, y};
     p1 := p0 + .{x_tweak - t, -t/2};
     p2 := p0 + .{x_tweak - t,  t/2};
     return p0, p1, p2;
