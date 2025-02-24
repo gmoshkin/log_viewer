@@ -647,7 +647,8 @@ do_scroll_bar_anchors :: (parent_rect: Rectangle, anchors: [] $T, color: Vector4
     for anchors {
         y := parent_rect.top - (it.line_index + 1) * effective_h;
 
-        hover := (target.x >= -t && target.x <= xx parent_rect.width && target.y >= y - slack && target.y <= y + h + slack);
+        p0, p1, p2 := get_scroll_bar_triangle(t, y + h / 2);
+        hover := triangle_contains(p0, p1, p2, target) || (target.x >= 0 && target.x <= xx parent_rect.width && target.y >= y - slack && target.y <= y + h + slack);
 
         #if #complete mode == {
         case .DRAW;
@@ -690,7 +691,6 @@ scroll_bar_anchor_parameters :: (parent_rect: Rectangle, max_count: int) -> (x: 
 draw_scroll_bar_anchor :: (x: float, y: float, w: float, h: float, $$t: float, color: Vector4, hover: bool) {
     hover_color := scroll_bar_anchor_hover_color;
 
-    triangle_middle_x_tweak :: 2.0;
 
     if hover {
         draw_axis_aligned_rectangle(x, y - 1, xx w, 1, hover_color);
@@ -699,9 +699,8 @@ draw_scroll_bar_anchor :: (x: float, y: float, w: float, h: float, $$t: float, c
     draw_axis_aligned_rectangle(xx x, y, xx w, h, color);
     {
         Y := y + h / 2;
-        p0 := Vector2.{x - triangle_middle_x_tweak, Y};
-        p1 := p0 + .{triangle_middle_x_tweak - t, -t/2};
-        p2 := p0 + .{triangle_middle_x_tweak - t,  t/2};
+        // FIXME @BROKEN!!!! I'm sleepy and I broke this!!!!
+        p0, p1, p2 := get_scroll_bar_triangle(t, Y);
         if hover {
             draw_triangle(p0 + .{ 2, 0 }, p1 + .{ -1.333333, -2 }, p2 + .{ -1.333333, 2 }, hover_color);
         }
@@ -710,6 +709,12 @@ draw_scroll_bar_anchor :: (x: float, y: float, w: float, h: float, $$t: float, c
 
 }
 
+get_scroll_bar_triangle :: ($$t: float, y: float, $x_tweak := 2.0) -> (Vector2, Vector2, Vector2) #expand {
+    p0 := Vector2.{-x_tweak, y};
+    p1 := p0 + .{x_tweak - t, -t/2};
+    p2 := p0 + .{x_tweak - t,  t/2};
+    return p0, p1, p2;
+}
 
 //
 // text pane stuff
@@ -1543,6 +1548,10 @@ triangle_contains :: (p0: Vector2, p1: Vector2, p2: Vector2, target: Vector2) ->
     has_pos := (d0 > 0) || (d1 > 0) || (d2 > 0);
 
     return !(has_neg && has_pos);
+}
+
+triangle_contains :: inline (t: [3] Vector2, target: Vector2) -> bool {
+    return triangle_contains(t[0], t[1], t[2], target);
 }
 
 //
