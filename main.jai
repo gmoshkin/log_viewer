@@ -4,18 +4,17 @@ EXE_NAME :: "log_viewer";
 
 TODO:
 
-- anchors??
+- removing garbage text
 - log parsing + semantic highlighting
-- BUG scroll bar almost non-existent
-- minimap
 - filterring? I'm not sure yet what I want/need
-- different panes for different ui elements
 - status bar
+- different panes for different ui elements
+- minimap (scroll bar almost does everything now)
 
 */
 
 main :: () {
-    // test_search_for_match();
+    // run_tests();
     // return;
 
     Profile();
@@ -24,7 +23,7 @@ main :: () {
     context.print_style.struct_printer = my_struct_printer;
 
     log("working directory: '%'", get_working_directory());
-    parse_command_line_arguments();
+    from_clipboard := parse_command_line_arguments();
 
     #if OS == .WINDOWS {
         // In order to have a hope of waiting a reasonable amount of time,
@@ -44,7 +43,7 @@ main :: () {
     assets_directory = sprint("%/assets", exe_dir);
 
     Profile();
-    load_text_buffer_data();
+    load_text_buffer_data(input_from_clipboard);
     Profile();
 
     reload_main_font();
@@ -299,10 +298,11 @@ update_and_draw_frame :: () -> bool {
         }
 
         else if text_search_ui_open {
-            text_search_ui_handle_input_event(it);
+            handled := text_search_ui_handle_input_event(it);
+            if handled continue;
         }
 
-        else if it.key_pressed && it.key_code == .ARROW_UP {
+        if it.key_pressed && it.key_code == .ARROW_UP {
             target_scroll_rows += -(ifx it.shift_pressed then 10 else 1);
             target_scroll_rows = clamp(target_scroll_rows, -text_pane_row_count / 2.0, total_line_count - text_pane_row_count / 2.0);
         } else if it.key_pressed && it.key_code == .ARROW_DOWN {
@@ -322,6 +322,8 @@ update_and_draw_frame :: () -> bool {
             }
         } else if it.key_pressed && it.key_code == .END && it.ctrl_pressed {
             target_scroll_rows = total_line_count - text_pane_row_count / 2.0;
+        } else if it.key_pressed && it.ctrl_pressed && it.shift_pressed && it.key_code == #char "V" {
+            load_text_buffer_data(from_clipboard=true);
         }
     }
 
@@ -899,7 +901,7 @@ color_blue :: #run hex_color("0069cb");
 color_coral :: #run hex_color("ff8080");
 color_yellow :: #run hex_color("ffdf00");
 color_cyan :: #run hex_color("208c73");
-color_magenta :: #run hex_color("cd00b7");
+color_magenta :: #run hex_color("ff00bb");
 color_orange :: #run hex_color("ff6b00");
 color_baby_blue :: #run hex_color("6bc8f2");
 color_purple :: #run hex_color("a000ff");
@@ -934,13 +936,22 @@ log_ranges_of_source: [..] Log_Range;
 
 SOURCE_ID_UNKNOWN :: cast(u8) 0xff;
 
-load_text_buffer_data :: () {
-    file_path := input_file_full_path;
-    if !input_file_full_path {
-        file_path = tprint("%/sample_log.txt", assets_directory);
+load_text_buffer_data :: (from_clipboard := false) {
+    free(text_buffer_data);
+    new_data: string;
+    if from_clipboard {
+        new_data = os_clipboard_get_text();
+    } else {
+        file_path := input_file_full_path;
+        if !input_file_full_path {
+            file_path = tprint("%/sample_log.txt", assets_directory);
+        }
+        new_data=, ok := read_entire_file(file_path);
+        assert(ok);
     }
-    text_buffer_data=, ok := read_entire_file(file_path);
-    assert(ok);
+
+    text_buffer_data = replace(new_data, "\r\n", "\n");
+    free(new_data);
 
     array_reset_keeping_memory(*text_buffer_all_log_sources);
     array_reserve(*text_buffer_all_log_sources, SOURCE_ID_UNKNOWN);
@@ -980,6 +991,10 @@ load_text_buffer_data :: () {
 
     log("line count: %", text_buffer_line_infos.count);
     log("max line length: %", max_line_length);
+
+    if search_results.matches {
+        update_text_buffer_search_results(search_results.search_string);
+    }
 }
 
 parse_text_buffer_log_line :: (line: string, info: *Log_Line_Info) -> bool {
@@ -1029,11 +1044,12 @@ add_source :: (sources: *[..] string, source: string) -> u8 {
 //
 
 Search_Results :: struct {
-    search_string_storage: [256] u8;
+    search_string_storage: [MAX_SEARCH_STRING_LENGTH + 1] u8;
     search_string: string;
     case_insensitive := false;
     matches: [..] Search_Match_Info;
 }
+MAX_SEARCH_STRING_LENGTH :: 255;
 
 Search_Match_Info :: struct {
     line_index: s32;
@@ -1048,7 +1064,7 @@ search_results: Search_Results;
 update_text_buffer_search_results :: (search_string: string) {
     assert(search_string.count < search_results.search_string_storage.count, "%", search_string.count);
     memcpy(search_results.search_string_storage.data, search_string.data, search_string.count);
-    search_results.search_string_storage[search_string.count] = 0;
+    search_results.search_string_storage[search_string.count] = 0; // XXX I don't really need this...
     search_results.search_string.data = search_results.search_string_storage.data;
     search_results.search_string.count = search_string.count;
 
@@ -1285,12 +1301,11 @@ close_text_search_ui :: () {
     text_search_ui_open = false;
 }
 
-text_search_ui_handle_input_event :: (event: Input.Event) {
-    if !event.key_pressed return;
+text_search_ui_handle_input_event :: (event: Input.Event) -> handled: bool {
+    if !event.key_pressed return handled=false;
 
-    if event.key_code >= #char " " && event.key_code <= #char "~" {
-        if event.ctrl_pressed return;
-        if event.alt_pressed return;
+    if !event.ctrl_pressed && event.key_code >= #char " " && event.key_code <= #char "~" {
+        if event.alt_pressed return handled=false;
 
         char := cast(u8) event.key_code;
         if event.shift_pressed {
@@ -1325,16 +1340,25 @@ text_search_ui_handle_input_event :: (event: Input.Event) {
             }
         }
 
+        if text_input_buffer.count + 1 > MAX_SEARCH_STRING_LENGTH {
+            // TODO: error reporting
+            log_error("search string truncated to % (wanted to add %)", MAX_SEARCH_STRING_LENGTH, 1);
+            return handled=true;
+        }
+
         array_insert_at(*text_input_buffer, char, text_input_cursor);
         text_input_cursor += 1;
 
         update_text_buffer_search_results(xx text_input_buffer);
 
         request_redraw(tprint("text search at %", #line));
+        return handled=true;
+
     } else if event.key_code == {
         case .ESCAPE;
             close_text_search_ui();
             request_redraw(tprint("text search at %", #line));
+            return handled=true;
 
         case .BACKSPACE;
             if text_input_cursor > 0 {
@@ -1344,6 +1368,7 @@ text_search_ui_handle_input_event :: (event: Input.Event) {
 
                 update_text_buffer_search_results(xx text_input_buffer);
             }
+            return handled=true;
 
         case .DELETE;
             if text_input_buffer.count > 0 && text_input_cursor < text_input_buffer.count {
@@ -1352,14 +1377,17 @@ text_search_ui_handle_input_event :: (event: Input.Event) {
 
                 update_text_buffer_search_results(xx text_input_buffer);
             }
+            return handled=true;
 
         case .ARROW_LEFT;
             if text_input_cursor > 0 then text_input_cursor -= 1;
             request_redraw(tprint("text search at %", #line));
+            return handled=true;
 
         case .ARROW_RIGHT;
             if text_input_cursor < text_input_buffer.count then text_input_cursor += 1;
             request_redraw(tprint("text search at %", #line));
+            return handled=true;
 
         case .ARROW_UP; // TODO: history
         case .ARROW_DOWN; // TODO: history
@@ -1367,10 +1395,33 @@ text_search_ui_handle_input_event :: (event: Input.Event) {
         case .HOME;
             text_input_cursor = 0;
             request_redraw(tprint("text search at %", #line));
+            return handled=true;
 
         case .END;
             text_input_cursor = text_input_buffer.count;
             request_redraw(tprint("text search at %", #line));
+            return handled=true;
+
+        case xx #char "V";
+            if event.ctrl_pressed {
+                text := os_clipboard_get_text(,, temp);
+                if text {
+                    text = replace(text, "\r\n", "",, temp);
+
+                    if text_input_buffer.count + text.count > MAX_SEARCH_STRING_LENGTH {
+                        // TODO: error reporting
+                        log_error("search string truncated to % (wanted to add %)", MAX_SEARCH_STRING_LENGTH, text.count);
+                        return handled=true;
+                    }
+
+                    array_insert_at(*text_input_buffer, cast([] u8) text, text_input_cursor);
+                    text_input_cursor += text.count;
+
+                    update_text_buffer_search_results(xx text_input_buffer);
+                    request_redraw(tprint("text search at %", #line));
+                }
+                return handled=true;
+            }
 
         case .ENTER;
             forwards := !event.shift_pressed;
@@ -1399,7 +1450,11 @@ text_search_ui_handle_input_event :: (event: Input.Event) {
             if matched_line_index >= 0 {
                 target_scroll_rows = xx matched_line_index;
             }
+
+            return handled=true;
     }
+
+    return handled=false;
 }
 
 draw_text_search_ui :: (rect: Rectangle, font: My_Dynamic_Font) {
@@ -1595,6 +1650,7 @@ key_is_down :: ($char: string) -> bool #expand {
 //
 
 input_file_full_path: string;
+input_from_clipboard: bool;
 
 parse_command_line_arguments :: () {
     args := get_command_line_arguments();
@@ -1606,7 +1662,17 @@ parse_command_line_arguments :: () {
     while cursor < args.count {
         arg := args[cursor];
 
-        // TODO: handle optional flags
+        if arg == {
+            case "-clipboard";
+                input_from_clipboard = true;
+                cursor += 1;
+                continue;
+        }
+
+        if arg[0] == #char "-" {
+            log_error("unexpected option '%'", arg);
+            exit(1);
+        }
 
         break;
     }
@@ -1762,6 +1828,13 @@ hex_digit :: inline (c: u8) -> u8, bool {
     }
 }
 
+resizable_array :: (items: [] $T) -> [..] T {
+    result: [..] T;
+    result.allocator = context.allocator;
+    array_add(*result, .. items);
+    return result;
+}
+
 array_ordered_remove_range :: inline (array_pointer: *[] $T, start: s64, end: s64) {
     assert(0 <= start, "start: %", start);
     assert(start < array_pointer.count, "start: %, array_poniter.count: %", start, array_pointer.count);
@@ -1777,6 +1850,73 @@ array_ordered_remove_range :: inline (array_pointer: *[] $T, start: s64, end: s6
         array[i] = array[i+count];
 
     array_pointer.count -= count;
+}
+
+array_insert_at :: (array: *[..] $T, items: [] T, index: int) {
+    assert(index >= 0);
+    assert(index <= array.count);
+    if !items.count return;
+
+    maybe_grow(xx array, items.count * size_of(T));
+
+    array.count += items.count;
+
+    i := array.count-1;
+    while i > index + items.count - 1 {
+        array.data[i] = array.data[i-items.count];
+        i -= 1;
+    }
+
+    memcpy(array.data + index, items.data, items.count * size_of(T));
+}
+
+test_array_insert_at :: () {
+    array: [..] int;
+
+    array = resizable_array(int.[1, 2, 3, 4, 5, 6],, temp);
+    for 0..array.count {
+        array_insert_at(*array, .[], it);
+        assert(array_equals(array, .[1, 2, 3, 4, 5, 6]), "it: %, %", it, array);
+    }
+
+    array = resizable_array(int.[1, 2, 3, 4, 5, 6],, temp);
+    array_insert_at(*array, .[0xa, 0xb, 0xc], 0);
+    assert(array_equals(array, .[0xa, 0xb, 0xc, 1, 2, 3, 4, 5, 6]), "%", array);
+
+    array = resizable_array(int.[1, 2, 3, 4, 5, 6],, temp);
+    array_insert_at(*array, .[0xa, 0xb, 0xc], 1);
+    assert(array_equals(array, .[1, 0xa, 0xb, 0xc, 2, 3, 4, 5, 6]), "%", array);
+
+    array = resizable_array(int.[1, 2, 3, 4, 5, 6],, temp);
+    array_insert_at(*array, .[0xa, 0xb, 0xc], 2);
+    assert(array_equals(array, .[1, 2, 0xa, 0xb, 0xc, 3, 4, 5, 6]), "%", array);
+
+    array = resizable_array(int.[1, 2, 3, 4, 5, 6],, temp);
+    array_insert_at(*array, .[0xa, 0xb, 0xc], 3);
+    assert(array_equals(array, .[1, 2, 3, 0xa, 0xb, 0xc, 4, 5, 6]), "%", array);
+
+    array = resizable_array(int.[1, 2, 3, 4, 5, 6],, temp);
+    array_insert_at(*array, .[0xa, 0xb, 0xc], 4);
+    assert(array_equals(array, .[1, 2, 3, 4, 0xa, 0xb, 0xc, 5, 6]), "%", array);
+
+    array = resizable_array(int.[1, 2, 3, 4, 5, 6],, temp);
+    array_insert_at(*array, .[0xa, 0xb, 0xc], 5);
+    assert(array_equals(array, .[1, 2, 3, 4, 5, 0xa, 0xb, 0xc, 6]), "%", array);
+
+    array = resizable_array(int.[1, 2, 3, 4, 5, 6],, temp);
+    array_insert_at(*array, .[0xa, 0xb, 0xc], 6);
+    assert(array_equals(array, .[1, 2, 3, 4, 5, 6, 0xa, 0xb, 0xc]), "%", array);
+
+    // This one crashes:
+    // array = resizable_array(int.[1, 2, 3, 4, 5, 6],, temp);
+    // array_insert_at(*array, .[0xa, 0xb, 0xc], 7);
+
+}
+
+array_equals :: (a: [] $T, b: [] T) -> bool {
+    if a.count != b.count return false;
+    for a if it != b[it_index] return false;
+    return true;
 }
 
 advance :: (array: [] u8, bytes: s64) -> result: [] u8 {
@@ -1912,6 +2052,11 @@ pretty_assert :: (code: Code, loc := #caller_location) #expand {
 // footer
 //
 
+run_tests :: () {
+    // test_search_for_match();
+    test_array_insert_at();
+}
+
 WANTED_MSAA :: 8;
 
 #run {
@@ -1929,3 +2074,4 @@ System :: #import "System";
 #import "Hash_Table";
 #import "File";
 #import "File_Utilities";
+#import "Clipboard";
