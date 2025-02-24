@@ -296,7 +296,13 @@ update_and_draw_frame :: () -> bool {
         } else if it.key_pressed && it.key_code == .PAGE_DOWN {
             target_scroll_rows += text_pane_row_count;
             target_scroll_rows = clamp(target_scroll_rows, -text_pane_row_count / 2.0, total_line_count - text_pane_row_count / 2.0);
-        } else if it.key_pressed && it.key_code == .ARROW_UP {
+        }
+
+        else if text_search_ui_open {
+            text_search_ui_handle_input_event(it);
+        }
+
+        else if it.key_pressed && it.key_code == .ARROW_UP {
             target_scroll_rows += -(ifx it.shift_pressed then 10 else 1);
             target_scroll_rows = clamp(target_scroll_rows, -text_pane_row_count / 2.0, total_line_count - text_pane_row_count / 2.0);
         } else if it.key_pressed && it.key_code == .ARROW_DOWN {
@@ -316,11 +322,6 @@ update_and_draw_frame :: () -> bool {
             }
         } else if it.key_pressed && it.key_code == .END && it.ctrl_pressed {
             target_scroll_rows = total_line_count - text_pane_row_count / 2.0;
-        }
-
-
-        else if text_search_ui_open {
-            text_search_ui_handle_input_event(it);
         }
     }
 
@@ -599,7 +600,7 @@ update_and_draw_frame :: () -> bool {
         print(*builder, "scroll: %, %\n", fmt(scroll_columns, 1), fmt(scroll_rows, 1));
         print(*builder, "num sources: %\n", text_buffer_all_log_sources.count);
         // print(*builder, "num ranges: %\n", log_ranges_of_source.count);
-        if text_search_ui_open print(*builder, "cursor: %\n", text_input_cursor);
+        // if text_search_ui_open print(*builder, "cursor: %\n", text_input_cursor);
         if text_search_ui_open print(*builder, "search matches: %\n", search_results.matches.count);
         if hovered_scroll_bar_anchor_index != -1 then print(*builder, "% %\n", hovered_scroll_bar_anchor_kind, hovered_scroll_bar_anchor_index);
         // if text_search_ui_open print(*builder, "case-insensitive: %\n", search_results.case_insensitive);
