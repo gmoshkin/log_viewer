@@ -137,7 +137,7 @@ hovered_scroll_bar_anchor_index: s64 = -1;
 update_and_draw_frame :: () -> bool {
     t0 := seconds_since_init();
 
-    array_reset_keeping_memory(*redraw_reasons);
+    array_reset(*redraw_reasons);
 
     should_quit := false;
 
@@ -2086,33 +2086,53 @@ evaluate_style_sequence :: (using sequence: Small_Escape_Sequence, using style: 
             case .BG_MAGENTA; bg_color = color_magenta;
             case .BG_CYAN;    bg_color = color_cyan;
             case .BG_WHITE;   bg_color = color_white;
-            case .BG_COLOR;   log_error("command 48 not implemented yet"); return;
+            case .BG_COLOR;   log_error_once("command 48 not implemented yet"); return;
                 // TODO
                 // - 2;{id}
                 // - 5;{r};{g};{b}
             case .BG_DEFAULT; bg_color = fg_default;
 
-            case .FG_BRIGHT_BLACK;   fg_color = color_black;   log_error("bright colors not supported yet");
-            case .FG_BRIGHT_RED;     fg_color = color_red;     log_error("bright colors not supported yet");
-            case .FG_BRIGHT_GREEN;   fg_color = color_green;   log_error("bright colors not supported yet");
-            case .FG_BRIGHT_YELLOW;  fg_color = color_yellow;  log_error("bright colors not supported yet");
-            case .FG_BRIGHT_BLUE;    fg_color = color_blue;    log_error("bright colors not supported yet");
-            case .FG_BRIGHT_MAGENTA; fg_color = color_magenta; log_error("bright colors not supported yet");
-            case .FG_BRIGHT_CYAN;    fg_color = color_cyan;    log_error("bright colors not supported yet");
-            case .FG_BRIGHT_WHITE;   fg_color = color_white;   log_error("bright colors not supported yet");
+            case .FG_BRIGHT_BLACK;   fg_color = color_black;   log_error_once("bright colors not supported yet");
+            case .FG_BRIGHT_RED;     fg_color = color_red;     log_error_once("bright colors not supported yet");
+            case .FG_BRIGHT_GREEN;   fg_color = color_green;   log_error_once("bright colors not supported yet");
+            case .FG_BRIGHT_YELLOW;  fg_color = color_yellow;  log_error_once("bright colors not supported yet");
+            case .FG_BRIGHT_BLUE;    fg_color = color_blue;    log_error_once("bright colors not supported yet");
+            case .FG_BRIGHT_MAGENTA; fg_color = color_magenta; log_error_once("bright colors not supported yet");
+            case .FG_BRIGHT_CYAN;    fg_color = color_cyan;    log_error_once("bright colors not supported yet");
+            case .FG_BRIGHT_WHITE;   fg_color = color_white;   log_error_once("bright colors not supported yet");
 
-            case .BG_BRIGHT_BLACK;   bg_color = color_black;   log_error("bright colors not supported yet");
-            case .BG_BRIGHT_RED;     bg_color = color_red;     log_error("bright colors not supported yet");
-            case .BG_BRIGHT_GREEN;   bg_color = color_green;   log_error("bright colors not supported yet");
-            case .BG_BRIGHT_YELLOW;  bg_color = color_yellow;  log_error("bright colors not supported yet");
-            case .BG_BRIGHT_BLUE;    bg_color = color_blue;    log_error("bright colors not supported yet");
-            case .BG_BRIGHT_MAGENTA; bg_color = color_magenta; log_error("bright colors not supported yet");
-            case .BG_BRIGHT_CYAN;    bg_color = color_cyan;    log_error("bright colors not supported yet");
-            case .BG_BRIGHT_WHITE;   bg_color = color_white;   log_error("bright colors not supported yet");
+            case .BG_BRIGHT_BLACK;   bg_color = color_black;   log_error_once("bright colors not supported yet");
+            case .BG_BRIGHT_RED;     bg_color = color_red;     log_error_once("bright colors not supported yet");
+            case .BG_BRIGHT_GREEN;   bg_color = color_green;   log_error_once("bright colors not supported yet");
+            case .BG_BRIGHT_YELLOW;  bg_color = color_yellow;  log_error_once("bright colors not supported yet");
+            case .BG_BRIGHT_BLUE;    bg_color = color_blue;    log_error_once("bright colors not supported yet");
+            case .BG_BRIGHT_MAGENTA; bg_color = color_magenta; log_error_once("bright colors not supported yet");
+            case .BG_BRIGHT_CYAN;    bg_color = color_cyan;    log_error_once("bright colors not supported yet");
+            case .BG_BRIGHT_WHITE;   bg_color = color_white;   log_error_once("bright colors not supported yet");
             case; log_error("unknown command: %", command);
         }
         i += 1;
     }
+}
+
+source_code_location_equals :: (a: Source_Code_Location, b: Source_Code_Location) -> bool {
+    return a.line_number == b.line_number && a.character_number == b.character_number &&
+        a.fully_pathed_filename == b.fully_pathed_filename;
+}
+source_code_location_hash :: (loc: Source_Code_Location) -> u32 {
+    h := Hash.get_hash(loc.fully_pathed_filename);
+    h = Hash.get_hash(loc.line_number, h);
+    h = Hash.get_hash(loc.character_number, h);
+    return h;
+}
+
+log_error_once_seen_locations: Table(Source_Code_Location, bool, given_hash_function=source_code_location_hash, given_compare_function=source_code_location_equals);
+log_error_once :: (format_string: string, args: .. Any, loc := #caller_location, flags := Log_Flags.NONE, user_flags : u32 = 0, section : *Log_Section = null) {
+    seen, ok := table_find(*log_error_once_seen_locations, loc);
+    if ok && seen return;
+
+    table_add(*log_error_once_seen_locations, loc, true);
+    inline log_error(format_string, ..args, loc=loc, flags=flags, user_flags=user_flags, section=section);
 }
 
 parse_escape_sequence :: (s: string) -> Small_Escape_Sequence, bool {
@@ -2572,3 +2592,4 @@ System :: #import "System";
 #import "File_Utilities";
 #import "Clipboard";
 #import "Pool";
+Hash :: #import "Hash";
