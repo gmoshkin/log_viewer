@@ -4,16 +4,9 @@ EXE_NAME :: "log_viewer";
 
 TODO:
 
-- removing garbage text:
-  the idea is such:
-    - put 2 anchors
-    - mouse hovers over anchor -> a connection line is shown connecting two
-                                  adjacent anchors closest to mouse
-    - interact with connection line to
-        - delete range of text
-        - hide range of text
 - log parsing + semantic highlighting
-- filterring? I'm not sure yet what I want/need
+- preview line at scroll bar anchor hovered over with mouse
+- filterring/hiding? I'm not sure yet what I want/need
 - status bar
 - different panes for different ui elements
 - minimap (scroll bar almost does everything now)
@@ -423,14 +416,18 @@ update_and_draw_frame :: () -> bool {
             anchor_kind = .SEARCH_MATCH;
         }
 
-        if anchor_index != -1 && is_click(.MOUSE_BUTTON_LEFT) {
+        if anchor_index != -1 {
             line_index: int;
             if #complete anchor_kind == {
                 case .EXPLICIT;     line_index = explicit_anchors[anchor_index].line_index;
                 case .SEARCH_MATCH; line_index = search_results.matches[anchor_index].line_index;
             }
-            target_scroll_rows = xx (line_index - text_pane_row_count / 2);
-            request_redraw(tprint("scroll bar anchors at %", #line));
+            if is_click(.MOUSE_BUTTON_LEFT) {
+                target_scroll_rows = xx (line_index - text_pane_row_count / 2);
+                request_redraw(tprint("scroll bar anchors at %", #line));
+            } else if is_click(.MOUSE_BUTTON_RIGHT) {
+                anchor_button_open_popup_menu(line_index, mouse);
+            }
         }
 
         if anchor_index != hovered_scroll_bar_anchor_index || anchor_kind != hovered_scroll_bar_anchor_kind {
@@ -588,6 +585,25 @@ update_and_draw_frame :: () -> bool {
 
             color := get_log_source_color(range.source_id);
             draw_axis_aligned_rectangle(xx x, y_bottom, xx w, y_top - y_bottom, color);
+        }
+
+        // draw active anchor range on scroll bar
+        {
+            above_line_index := active_anchor_segment[0].line_index;
+            bellow_line_index := active_anchor_segment[1].line_index;
+            if above_line_index != -1 || bellow_line_index != -1 {
+                // Makes complete sense
+                assert(above_line_index <= bellow_line_index);
+
+                y_top := rect.top - above_line_index / cast(float) lines_per_scroll_bar_pixel;
+                y_bottom := rect.top - bellow_line_index / cast(float) lines_per_scroll_bar_pixel;
+
+                my_w := w / 2.5;
+                my_x := x + (w - my_w) / 2;
+
+                color := main_text_pane_dim_background_color;
+                draw_axis_aligned_rectangle(xx my_x, y_bottom, xx my_w, y_top - y_bottom, color);
+            }
         }
 
         // draw visible scroll bar slider border
@@ -781,7 +797,20 @@ draw_the_text_pane :: (rect: Rectangle) {
 
     // background
     {
-        draw_axis_aligned_rectangle(rect, background_color);
+        h := main_font.line_height;
+
+        x := left(rect);
+        y_top := cast(float) top(rect);
+        if scroll_rows < 0 then y_top += scroll_rows * h;
+
+        y_bottom := cast(float) bottom(rect);
+        text_height := (text_buffer_line_infos.count - scroll_rows) * h;
+        if text_height < xx height(rect) then y_bottom = top(rect) - text_height;
+
+
+        w := width(rect);
+        H := y_top - y_bottom;
+        draw_axis_aligned_rectangle(xx x, xx y_bottom, xx w, xx H, background_color);
     }
 
     hover_line_index := -1;
@@ -831,7 +860,7 @@ draw_the_text_pane :: (rect: Rectangle) {
                 override_ansi_style.fg_color = color;
                 override_ansi_style.bg_color = main_text_pane_dim_background_color;
 
-                draw_axis_aligned_rectangle(xx x, xx y, xx rect.width, xx main_font.line_height, main_text_pane_dim_background_color);
+                draw_axis_aligned_rectangle(xx rect.left, xx y, xx rect.width, xx main_font.line_height, main_text_pane_dim_background_color);
             } else {
                 override_ansi_style = .{};
             }
@@ -1107,7 +1136,9 @@ log_ranges_of_source: [..] Log_Range;
 SOURCE_ID_UNKNOWN :: cast(u8) 0xff;
 
 load_text_buffer_data :: (from_clipboard := false) {
-    free(text_buffer_data);
+    mark := get_temporary_storage_mark();
+    defer set_temporary_storage_mark(mark);
+
     new_data: string;
     if from_clipboard {
         log("reading text data from clipboard");
@@ -1122,9 +1153,22 @@ load_text_buffer_data :: (from_clipboard := false) {
         assert(ok);
     }
 
-    t := replace(new_data, "\r\n", "\n",, temp);
-    text_buffer_data = replace(t, "\r", "\n");
-    free(new_data);
+    free(text_buffer_data);
+    text_buffer_data = new_data;
+
+    process_text_buffer_data();
+}
+
+process_text_buffer_data :: () {
+    // TODO: keeping history, undo/redo, etc.
+
+    if contains(text_buffer_data, #char "\r") {
+        // FIXME could also replace this in place...
+        new_data := replace(text_buffer_data, "\r\n", "\n");
+        free(text_buffer_data);
+        text_buffer_data = new_data;
+        replace_in_place(text_buffer_data, #char "\r", #char "\n");
+    }
 
     array_reset_keeping_memory(*text_buffer_all_log_sources);
     array_reserve(*text_buffer_all_log_sources, SOURCE_ID_UNKNOWN);
@@ -1179,6 +1223,38 @@ load_text_buffer_data :: (from_clipboard := false) {
     if search_results.matches {
         update_text_buffer_search_results(search_results.search_string);
     }
+}
+
+text_buffer_data_remove_range :: (first_line: s64, last_line: s64) {
+    assert(0 <= first_line, "%", first_line);
+    assert(first_line <= last_line, "% v %", first_line, last_line);
+    assert(last_line <= text_buffer_line_infos.count, "% v %", last_line, text_buffer_line_infos.count);
+
+    n_lines_removed := last_line - first_line + 1;
+    for *explicit_anchors {
+        if it.line_index < first_line continue;
+        if it.line_index <= last_line {
+            remove it;
+        } else {
+            it.line_index -= n_lines_removed;
+        }
+    }
+
+    if scroll_rows > xx first_line {
+        scroll_rows -= n_lines_removed;
+        target_scroll_rows -= n_lines_removed;
+    }
+
+    start := text_buffer_line_infos[first_line].line_offset;
+    end := ifx last_line >= text_buffer_line_infos.count - 1 then text_buffer_data.count
+                                                             else text_buffer_line_infos[last_line + 1].line_offset;
+
+    moved := text_buffer_data.count - end;
+    removed := end - start;
+    memcpy(text_buffer_data.data + start, text_buffer_data.data + end, moved);
+    text_buffer_data.count -= removed;
+
+    process_text_buffer_data();
 }
 
 parse_text_buffer_log_line :: (line: string, info: *Log_Line_Info) -> bool {
@@ -1724,9 +1800,13 @@ anchor_button_open_popup_menu :: (line_index: int, mouse: Vector2) {
     anchor_above := Anchor.{-1};   // I'm not stupid, this line is above
     anchor_bellow := Anchor.{-1};  // this one on the monitor
     for explicit_anchors {
-        if it.line_index < line_index      then anchor_above = it;
-        else if it.line_index > line_index then anchor_bellow = it;
-                                           else anchor = it;
+        if it.line_index < line_index {
+            anchor_above = it;
+        } else if it.line_index > line_index {
+            if anchor_bellow.line_index == -1 then anchor_bellow = it;
+        } else {
+            anchor = it;
+        }
     }
 
     data := Anchor_Button_Popup_Menu_Callback_Data.{line_index, anchor, anchor_above, anchor_bellow};
@@ -1766,34 +1846,36 @@ anchor_button_popup_menu_callback :: (menu: *Popup_Menu, event: Popup_Menu_Event
     assert(menu.callback_data.type == type_info(Anchor_Button_Popup_Menu_Callback_Data));
     data := cast(*Anchor_Button_Popup_Menu_Callback_Data) menu.callback_data.value_pointer;
 
+    first, last: Anchor;
+
     item := menu.items[menu.hovered_item];
     command := cast(Anchor_Button_Popup_Menu_Item_Id) item.id;
-    if event == {
-        case .CLICK;
-            if #complete command == {
-                case .TOGGLE;
-                    anchor_button_toggle(data.line_index);
+    if #complete command == {
+        case .TOGGLE;
+            if event == .CLICK
+                anchor_button_toggle(data.line_index);
 
-                case .DELETE_1_LINE;     log_error("delete 1 line not implemented yet");
-                case .DELETE_LINES_UP;   log_error("delete lines up not implemented yet");
-                case .DELETE_LINES_DOWN; log_error("delete lines down not implemented yet");
-            }
-        case .HOVER;
-            if command == {
-                case .DELETE_1_LINE;
-                    active_anchor_segment[0] = .{data.line_index};
-                    active_anchor_segment[1] = .{data.line_index};
-                case .DELETE_LINES_UP;
-                    anchor := data.anchor_above;
-                    if anchor.line_index == -1 then anchor.line_index = 0;
-                    active_anchor_segment[0] = anchor;
-                    active_anchor_segment[1] = .{data.line_index};
-                case .DELETE_LINES_DOWN;
-                    active_anchor_segment[0] = .{data.line_index};
-                    anchor := data.anchor_bellow;
-                    if anchor.line_index == -1 then anchor.line_index = text_buffer_line_infos.count - 1;
-                    active_anchor_segment[1] = anchor;
-            }
+        case .DELETE_1_LINE;
+            first = Anchor.{data.line_index};
+            last = Anchor.{data.line_index};
+
+        case .DELETE_LINES_UP;
+            first = data.anchor_above;
+            if first.line_index == -1 then first.line_index = 0;
+            last = Anchor.{data.line_index};
+
+        case .DELETE_LINES_DOWN;
+            first = Anchor.{data.line_index};
+            last = data.anchor_bellow;
+            if last.line_index == -1 then last.line_index = text_buffer_line_infos.count - 1;
+    }
+
+    if command == .DELETE_1_LINE || command == .DELETE_LINES_UP || command == .DELETE_LINES_DOWN {
+        active_anchor_segment[0] = first;
+        active_anchor_segment[1] = last;
+
+        if event == .CLICK
+            text_buffer_data_remove_range(first.line_index, last.line_index);
     }
 }
 
@@ -2806,6 +2888,16 @@ split_at :: (a: [] $T, i: int) -> ([] T, [] T) {
     r.count = a.count - i;
 
     return l, r;
+}
+
+replace_in_place :: (s: string, old: u8, new: u8) -> string {
+    cursor := 0;
+    while true {
+        cursor = find_index_from_left(s, old, cursor);
+        if cursor == -1 break;
+        s[cursor] = new;
+    }
+    return s;
 }
 
 split_at :: (s: string, i: int) -> (string, string) {
