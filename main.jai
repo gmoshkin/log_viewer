@@ -760,6 +760,8 @@ draw_the_text_pane :: (rect: Rectangle) {
         y := rect.top - h + scroll_rows * main_font.line_height;
         text_y_tweak := -(main_font.typical_descender + main_font.max_descender) / 2.0;
 
+        current_ansi_style := Style.{ fg_color = text_color };
+
         search_matches_cursor := 0;
         line_index := 0;
         while tail {
@@ -804,7 +806,7 @@ draw_the_text_pane :: (rect: Rectangle) {
                 if info.escape_codes_count != 0 {
                     codes := array_view(text_buffer_escape_code_infos, info.escape_codes_start, info.escape_codes_count);
                     draw_text_line_with_ansi_escape_codes(main_font, line, n_columns_to_skip, xx pane_width_in_characters,
-                                                          x, -x_tweak, y, text_y_tweak, color, codes);
+                                                          x, -x_tweak, y, text_y_tweak, color, codes, *current_ansi_style);
                 } else {
                     line = advance(line, n_columns_to_skip);
                     line.count = min(line.count, xx pane_width_in_characters);
@@ -829,35 +831,13 @@ draw_the_text_pane :: (rect: Rectangle) {
 
 }
 
-/*
-
- | 0   4
- | People who <bold>merely<no_bold> <red>believe<reset> and don't think always forget that they continually expose themselves to their own worst enemy: doubt.
- |     >
-
- | n_columns_to_skip = 4
--|     [     ]
--|                  [    ]
-
-
- |
- | People who <bold>merely<no_bold> <red>believe<reset> and don't think always forget that they continually expose themselves to their own worst enemy: doubt.
- |                   >
-
- |                                         >
- | People who <bold>merely<no_bold> <red>believe<reset> and don't think always forget that they continually expose themselves to their own worst enemy: doubt.
- |
-
-*/
-
 draw_text_line_with_ansi_escape_codes :: (font_set: My_Dynamic_Font, text: string,
                                           n_columns_to_skip: int, max_characters: int,
                                           left: float, text_x_tweak: float,
                                           bottom: float, text_y_tweak: float,
-                                          default_color: Vector4, codes: [] Escape_Code_Info)
+                                          default_color: Vector4, codes: [] Escape_Code_Info,
+                                          current_style: *Style)
 {
-    current_style := Style.{ fg_color = default_color };
-
     current_invisible_before: u16 = 0;
 
     segments: [..] struct { start: u16; count: u16; invisible_before: u16; style: Style; };
@@ -867,13 +847,16 @@ draw_text_line_with_ansi_escape_codes :: (font_set: My_Dynamic_Font, text: strin
     cursor := 0;
     for codes {
         assert(cursor < text.count);
-        array_add(*segments, .{xx cursor, xx (it.start - cursor), current_invisible_before, current_style});
+        segment_length := it.start - cursor;
+        if segment_length != 0 {
+            array_add(*segments, .{xx cursor, xx segment_length, current_invisible_before, current_style.*});
+        }
         current_invisible_before += it.count;
         cursor = it.start + it.count;
-        evaluate_style_sequence(it.sequence, *current_style, default_color);
+        evaluate_style_sequence(it.sequence, current_style, default_color);
     }
     assert(cursor <= text.count);
-    array_add(*segments, .{xx cursor, xx (text.count - cursor), current_invisible_before, current_style});
+    array_add(*segments, .{xx cursor, xx (text.count - cursor), current_invisible_before, current_style.*});
 
     i := 0;
     while i < segments.count {
@@ -884,6 +867,7 @@ draw_text_line_with_ansi_escape_codes :: (font_set: My_Dynamic_Font, text: strin
         if to_cut < 0 { i += 1; continue; }
 
         it.start += xx to_cut;
+        it.count -= xx to_cut;
         break;
     }
 
@@ -903,7 +887,7 @@ draw_text_line_with_ansi_escape_codes :: (font_set: My_Dynamic_Font, text: strin
         to_cut := visible_end - stop;
         if to_cut > 0 then it.count -= xx to_cut;
 
-        x := character_width * (visible_start - n_columns_to_skip + text_x_tweak);
+        x := left + character_width * (visible_start - n_columns_to_skip) + text_x_tweak;
 
         fg_color := it.style.fg_color;
         bg_color := it.style.bg_color;
@@ -1029,6 +1013,7 @@ color_purple :: #run hex_color("a000ff");
 color_white :: #run hex_color("ffffff");
 color_brown :: #run hex_color("973f00");
 color_black :: #run hex_color("000000");
+color_gray :: #run hex_color("707070");
 
 log_source_color_scheme := Vector4.[
     color_red,
@@ -2092,7 +2077,7 @@ evaluate_style_sequence :: (using sequence: Small_Escape_Sequence, using style: 
                 // - 5;{r};{g};{b}
             case .BG_DEFAULT; bg_color = fg_default;
 
-            case .FG_BRIGHT_BLACK;   fg_color = color_black;   log_error_once("bright colors not supported yet");
+            case .FG_BRIGHT_BLACK;   fg_color = color_gray;
             case .FG_BRIGHT_RED;     fg_color = color_red;     log_error_once("bright colors not supported yet");
             case .FG_BRIGHT_GREEN;   fg_color = color_green;   log_error_once("bright colors not supported yet");
             case .FG_BRIGHT_YELLOW;  fg_color = color_yellow;  log_error_once("bright colors not supported yet");
@@ -2101,7 +2086,7 @@ evaluate_style_sequence :: (using sequence: Small_Escape_Sequence, using style: 
             case .FG_BRIGHT_CYAN;    fg_color = color_cyan;    log_error_once("bright colors not supported yet");
             case .FG_BRIGHT_WHITE;   fg_color = color_white;   log_error_once("bright colors not supported yet");
 
-            case .BG_BRIGHT_BLACK;   bg_color = color_black;   log_error_once("bright colors not supported yet");
+            case .BG_BRIGHT_BLACK;   bg_color = color_gray;
             case .BG_BRIGHT_RED;     bg_color = color_red;     log_error_once("bright colors not supported yet");
             case .BG_BRIGHT_GREEN;   bg_color = color_green;   log_error_once("bright colors not supported yet");
             case .BG_BRIGHT_YELLOW;  bg_color = color_yellow;  log_error_once("bright colors not supported yet");
@@ -2173,12 +2158,19 @@ parse_escape_sequence :: (s: string) -> Small_Escape_Sequence, bool {
 my_logger :: (message: string, data: *void, info: Log_Info) {
     builder: String_Builder;
     builder.allocator = temp;
+
+    if info.common_flags & .ERROR   print(*builder, "\e[31m");
+    if info.common_flags & .WARNING print(*builder, "\e[33m");
+
     print_time_for_log(*builder, to_calendar(current_time_consensus(), .LOCAL));
     print(*builder, ": ");
     if #compile_time print(*builder, "#compile_time ");
 
     filename := path_filename(info.location.fully_pathed_filename);
     print(*builder, "[%:%] %\n", filename, info.location.line_number, message);
+
+    if info.common_flags & (.ERROR | .WARNING) print(*builder, "\e[0m");
+
     write_builder(*builder);
 }
 
