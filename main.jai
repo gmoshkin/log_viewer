@@ -1059,7 +1059,8 @@ load_text_buffer_data :: (from_clipboard := false) {
         assert(ok);
     }
 
-    text_buffer_data = replace(new_data, "\r\n", "\n");
+    t := replace(new_data, "\r\n", "\n",, temp);
+    text_buffer_data = replace(t, "\r", "\n");
     free(new_data);
 
     array_reset_keeping_memory(*text_buffer_all_log_sources);
