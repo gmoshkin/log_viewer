@@ -42,6 +42,10 @@ main :: () {
     exe_dir := path_strip_filename(exe_path);
     assets_directory = sprint("%/assets", exe_dir);
 
+    set_allocators(*escape_code_stats_pool);
+    escape_code_stats_allocator = .{pool_allocator_proc, *escape_code_stats_pool};
+    init(*escape_code_stats,, escape_code_stats_allocator);
+
     Profile();
     load_text_buffer_data(input_from_clipboard);
     Profile();
@@ -323,7 +327,9 @@ update_and_draw_frame :: () -> bool {
         } else if it.key_pressed && it.key_code == .END && it.ctrl_pressed {
             target_scroll_rows = total_line_count - text_pane_row_count / 2.0;
         } else if it.key_pressed && it.ctrl_pressed && it.shift_pressed && it.key_code == #char "V" {
+            Profile();
             load_text_buffer_data(from_clipboard=true);
+            Profile();
         }
     }
 
@@ -752,7 +758,7 @@ draw_the_text_pane :: (rect: Rectangle) {
 
         x := rect.left + text_x_tweak;
         y := rect.top - h + scroll_rows * main_font.line_height;
-        text_y_tweak := -(main_font.typical_descender + main_font.max_descender) / 2;
+        text_y_tweak := -(main_font.typical_descender + main_font.max_descender) / 2.0;
 
         search_matches_cursor := 0;
         line_index := 0;
@@ -780,6 +786,9 @@ draw_the_text_pane :: (rect: Rectangle) {
             n_columns_to_skip := cast(int) floor(scroll_columns);
             x_tweak := (scroll_columns - n_columns_to_skip) * main_font.mono_width;
 
+            // if line_index % 2 == 0
+            //     draw_axis_aligned_rectangle(xx x, xx y, xx rect.width, xx main_font.line_height, hex_color("005050"));
+
             if xx line.count > scroll_columns {
                 info := *text_buffer_line_infos[line_index];
                 color := text_color;
@@ -792,17 +801,21 @@ draw_the_text_pane :: (rect: Rectangle) {
                     font = main_font.bold;
                 }
 
-                line = advance(line, n_columns_to_skip);
-                line.count = min(line.count, xx pane_width_in_characters);
+                if info.escape_codes_count != 0 {
+                    codes := array_view(text_buffer_escape_code_infos, info.escape_codes_start, info.escape_codes_count);
+                    draw_text_line_with_ansi_escape_codes(main_font, line, n_columns_to_skip, xx pane_width_in_characters,
+                                                          x, -x_tweak, y, text_y_tweak, color, codes);
+                } else {
+                    line = advance(line, n_columns_to_skip);
+                    line.count = min(line.count, xx pane_width_in_characters);
 
-                w_text := Simp.prepare_text(font, line);
-                // This fails for unicode!
-                // assert(w_text == main_font.mono_width * line.count);
+                    // TODO: tabs handling (I fucking hate tabs!!!!)
+                    w_text := Simp.prepare_text(font, line);
+                    // This fails for unicode!
+                    // assert(w_text == main_font.mono_width * line.count);
 
-                // if line_index % 2 == 0
-                //     draw_axis_aligned_rectangle(xx x, xx y, xx rect.width, xx main_font.line_height, hex_color("005050"));
-
-                Simp.draw_prepared_text(font, xx (x - x_tweak), xx y + text_y_tweak, color);
+                    Simp.draw_prepared_text(font, xx (x - x_tweak), xx (y + text_y_tweak), color);
+                }
             }
 
             // handle search match
@@ -814,6 +827,103 @@ draw_the_text_pane :: (rect: Rectangle) {
 
     }
 
+}
+
+/*
+
+ | 0   4
+ | People who <bold>merely<no_bold> <red>believe<reset> and don't think always forget that they continually expose themselves to their own worst enemy: doubt.
+ |     >
+
+ | n_columns_to_skip = 4
+-|     [     ]
+-|                  [    ]
+
+
+ |
+ | People who <bold>merely<no_bold> <red>believe<reset> and don't think always forget that they continually expose themselves to their own worst enemy: doubt.
+ |                   >
+
+ |                                         >
+ | People who <bold>merely<no_bold> <red>believe<reset> and don't think always forget that they continually expose themselves to their own worst enemy: doubt.
+ |
+
+*/
+
+draw_text_line_with_ansi_escape_codes :: (font_set: My_Dynamic_Font, text: string,
+                                          n_columns_to_skip: int, max_characters: int,
+                                          left: float, text_x_tweak: float,
+                                          bottom: float, text_y_tweak: float,
+                                          default_color: Vector4, codes: [] Escape_Code_Info)
+{
+    current_style := Style.{ fg_color = default_color };
+
+    current_invisible_before: u16 = 0;
+
+    segments: [..] struct { start: u16; count: u16; invisible_before: u16; style: Style; };
+    segments.allocator = temp;
+    array_reserve(*segments, codes.count + 1);
+
+    cursor := 0;
+    for codes {
+        assert(cursor < text.count);
+        array_add(*segments, .{xx cursor, xx (it.start - cursor), current_invisible_before, current_style});
+        current_invisible_before += it.count;
+        cursor = it.start + it.count;
+        evaluate_style_sequence(it.sequence, *current_style, default_color);
+    }
+    assert(cursor <= text.count);
+    array_add(*segments, .{xx cursor, xx (text.count - cursor), current_invisible_before, current_style});
+
+    i := 0;
+    while i < segments.count {
+        it := *segments[i];
+        visible_start := it.start - it.invisible_before;
+        if visible_start + it.count <= n_columns_to_skip { i += 1; continue; }
+        to_cut := n_columns_to_skip - visible_start;
+        if to_cut < 0 { i += 1; continue; }
+
+        it.start += xx to_cut;
+        break;
+    }
+
+    if i >= segments.count return;
+
+    line_height := font_set.line_height;
+    character_width := font_set.mono_width;
+
+    stop := n_columns_to_skip + max_characters;
+    while i < segments.count {
+        defer i += 1;
+        it := segments[i];
+
+        visible_start := it.start - it.invisible_before;
+        if visible_start >= stop break;
+        visible_end := visible_start + it.count;
+        to_cut := visible_end - stop;
+        if to_cut > 0 then it.count -= xx to_cut;
+
+        x := character_width * (visible_start - n_columns_to_skip + text_x_tweak);
+
+        fg_color := it.style.fg_color;
+        bg_color := it.style.bg_color;
+        if it.style.attributes & .INVERSE then inline Swap(*fg_color, *bg_color);
+
+        if bg_color.w != 0 {
+            w := character_width * it.count;
+            draw_axis_aligned_rectangle(xx x, xx bottom, xx w, xx line_height, bg_color);
+        }
+
+        font := font_for_attributes(font_set, it.style.attributes);
+
+        // TODO: tabs handling (I fucking hate tabs!!!!)
+        segment_text := slice(text, it.start, it.count);
+        w_text := Simp.prepare_text(font, segment_text);
+        // This fails for unicode!
+        // assert(w_text == main_font.mono_width * line.count);
+
+        Simp.draw_prepared_text(font, xx x, xx (bottom + text_y_tweak), fg_color);
+    }
 }
 
 draw_search_match_border :: (parent_rect: Rectangle, font: My_Dynamic_Font, text_x_tweak: float, y: float, line_index: int, cursor: *int) {
@@ -887,13 +997,24 @@ screen_position_to_line_index :: (rect: Rectangle, y: float) -> s64 {
 text_buffer_data: string;
 text_buffer_all_log_sources: [..] string;
 text_buffer_line_infos: [..] Log_Line_Info;
+text_buffer_escape_code_infos: [..] Escape_Code_Info;
 
 Log_Line_Info :: struct {
     line_offset: s64;
     source_id: u8 = SOURCE_ID_UNKNOWN;
     source_start: u8;
+    escape_codes_start: s16;
+    escape_codes_count: s16;
     // TODO: timestamp
 }
+
+Escape_Code_Info :: struct {
+    // relative to line start
+    start: s32;
+    count: u8;
+    sequence: Small_Escape_Sequence;
+}
+#assert size_of(Escape_Code_Info) == 16;
 
 color_red :: #run hex_color("db0011");
 color_green :: #run hex_color("00c52c");
@@ -907,6 +1028,7 @@ color_baby_blue :: #run hex_color("6bc8f2");
 color_purple :: #run hex_color("a000ff");
 color_white :: #run hex_color("ffffff");
 color_brown :: #run hex_color("973f00");
+color_black :: #run hex_color("000000");
 
 log_source_color_scheme := Vector4.[
     color_red,
@@ -940,12 +1062,14 @@ load_text_buffer_data :: (from_clipboard := false) {
     free(text_buffer_data);
     new_data: string;
     if from_clipboard {
+        log("reading text data from clipboard");
         new_data = os_clipboard_get_text();
     } else {
         file_path := input_file_full_path;
         if !input_file_full_path {
             file_path = tprint("%/sample_log.txt", assets_directory);
         }
+        log("reading file '%'", file_path);
         new_data=, ok := read_entire_file(file_path);
         assert(ok);
     }
@@ -957,6 +1081,7 @@ load_text_buffer_data :: (from_clipboard := false) {
     array_reserve(*text_buffer_all_log_sources, SOURCE_ID_UNKNOWN);
     array_reset_keeping_memory(*text_buffer_line_infos);
     array_reset_keeping_memory(*log_ranges_of_source);
+    array_reset_keeping_memory(*text_buffer_escape_code_infos);
 
     max_line_length := 0;
 
@@ -976,6 +1101,11 @@ load_text_buffer_data :: (from_clipboard := false) {
             array_add(*log_ranges_of_source, .{ info.source_id, line_index });
         }
 
+        // line_offset := line.data - text_buffer_data.data;
+        info.escape_codes_start = xx text_buffer_escape_code_infos.count;
+        parse_ansi_escape_codes(line, 0, *text_buffer_escape_code_infos);
+        info.escape_codes_count = xx (text_buffer_escape_code_infos.count - info.escape_codes_start);
+
         if !ok continue;
 
     }
@@ -991,6 +1121,11 @@ load_text_buffer_data :: (from_clipboard := false) {
 
     log("line count: %", text_buffer_line_infos.count);
     log("max line length: %", max_line_length);
+    log("escape code count: % (% unique)", text_buffer_escape_code_infos.count, escape_code_stats.count);
+
+    for escape_code_stats {
+        log("'%': %, seen % times", cast(Ascii_Or_Hex) it_index, parse_escape_sequence(it_index), it);
+    }
 
     if search_results.matches {
         update_text_buffer_search_results(search_results.search_string);
@@ -1251,23 +1386,44 @@ other_case :: inline (char: u8) -> (char: u8, ok: bool) {
 My_Dynamic_Font :: struct {
     using regular: *Simp.Dynamic_Font;
     bold: *Simp.Dynamic_Font;
+    italic: *Simp.Dynamic_Font;
+    bold_italic: *Simp.Dynamic_Font;
     pixel_height: int;
     mono_width: int;
     line_height: int;
 }
 
-reload_main_font :: () {
-    load_font("Codetta-Regular.ttf", "Codetta-Bold.ttf", *main_font);
+font_for_attributes :: (font: My_Dynamic_Font, attributes: Style_Attributes) -> *Simp.Dynamic_Font {
+    if attributes == {
+        case .BOLD;           return font.bold;
+        case .ITALIC;         return font.italic;
+        case .BOLD | .ITALIC; return font.bold_italic;
+    }
+    return font.regular;
 }
 
-load_font :: (regular_name: string, bold_name: string, font: *My_Dynamic_Font) {
+reload_main_font :: () {
+    load_font("Codetta", *main_font);
+}
+
+load_font :: (name: string, font: *My_Dynamic_Font) {
     assert(font.pixel_height >= 0);
 
+    regular_name := tprint("%-Regular.ttf", name);
     log("loading '%' at size %", regular_name, font.pixel_height);
     font.regular = Simp.get_font_at_size(assets_directory, regular_name, font.pixel_height);
 
+    bold_name := tprint("%-Bold.ttf", name);
     log("loading '%' at size %", bold_name, font.pixel_height);
     font.bold = Simp.get_font_at_size(assets_directory, bold_name, font.pixel_height);
+
+    italic_name := tprint("%-Italic.ttf", name);
+    log("loading '%' at size %", italic_name, font.pixel_height);
+    font.italic = Simp.get_font_at_size(assets_directory, italic_name, font.pixel_height);
+
+    bold_italic_name := tprint("%-BoldItalic.ttf", name);
+    log("loading '%' at size %", bold_italic_name, font.pixel_height);
+    font.bold_italic = Simp.get_font_at_size(assets_directory, bold_italic_name, font.pixel_height);
 
     font.line_height = xx (font.character_height - font.typical_descender);
     text_width := Simp.prepare_text(font.regular, "abc");
@@ -1654,6 +1810,7 @@ input_from_clipboard: bool;
 
 parse_command_line_arguments :: () {
     args := get_command_line_arguments();
+    log("command line arguments: %", args);
 
     working_directory := get_working_directory();
     working_directory_path := parse_path(working_directory);
@@ -1678,8 +1835,14 @@ parse_command_line_arguments :: () {
     }
 
     if cursor < args.count {
-        arg := args[cursor];
-        input_file_full_path = sprint("%/%", working_directory, arg);
+        file := args[cursor];
+        if is_absolute_path(file) {
+            input_file_full_path = file;
+        } else if OS == .WINDOWS && file && file[0] == #char "/" {
+            input_file_full_path = convert_wsl_path_to_windows(file);
+        } else {
+            input_file_full_path = sprint("%/%", working_directory, file);
+        }
         cursor += 1;
     }
 
@@ -1692,6 +1855,295 @@ parse_command_line_arguments :: () {
         exit(1);
     }
 
+}
+
+convert_wsl_path_to_windows :: (path: string) -> string {
+    builder: String_Builder;
+    builder.allocator = temp;
+
+    tail := path;
+    PREFIX :: "/mnt/";
+    if starts_with(tail, PREFIX) && tail.count > PREFIX.count {
+        append(*builder, to_upper(tail[PREFIX.count]));
+        append(*builder, #char ":");
+
+        tail = advance(tail, PREFIX.count + 1);
+    }
+
+    while tail {
+        found:, head:, tail = split_from_left(tail, #char "/");
+        append(*builder, head);
+        if found then append(*builder, #char "\\");
+    }
+
+    return builder_to_string(*builder);
+}
+
+
+//
+// ansi escape sequences
+//
+
+escape_code_stats: Table(string, int);
+escape_code_stats_pool: Pool;
+escape_code_stats_allocator: Allocator;
+parse_ansi_escape_codes :: (line: string, line_start: s32, infos: *[..] Escape_Code_Info) {
+    tail := line;
+    offset := 0;
+    while tail {
+        head:, found_escape:, tail = eat_visible_or_escape_sequence(tail);
+        defer offset += head.count;
+
+        if found_escape {
+            sequence := parse_escape_sequence(head);
+            start := cast(s32, line_start + offset);
+            array_add(infos, Escape_Code_Info.{start, xx head.count, sequence});
+
+            count := table_find_pointer(*escape_code_stats, head);
+            if count then count.* += 1;
+            else {
+                table_add(*escape_code_stats, copy_string(head,, escape_code_stats_allocator), 1);
+            }
+        }
+    }
+}
+
+// @INCOMPLETE lacking unicode support
+eat_visible_or_escape_sequence :: (text: string) -> head: string, found_escape: bool, tail: string {
+    if !text return "", false, "";
+
+    count := find_index_from_left(text, #char "\e");
+    if count < 0 then count = text.count;
+
+    if count > 0 {
+        // Visible character sequence
+        head, tail := inline split_at(text, count);
+
+        return head, false, tail;
+    }
+
+    // Escape sequence
+    count += 1;
+
+    if count < text.count {
+        char := text[count];
+        if char == #char "[" {
+            count += 1;
+            while count < text.count {
+                char = text[count];
+                count += 1;
+
+                if char >= #char "a" && char <= #char "z" break;
+                if char >= #char "A" && char <= #char "Z" break;
+            }
+        } else {
+            // TODO: don't care about other escape codes for now
+        }
+    }
+
+    head, tail := inline split_at(text, count);
+    return head, true, tail;
+}
+
+Small_Escape_Sequence :: struct {
+    command_letter: u8;
+    argument_count: u8;
+    arguments: [6] u8;
+}
+#assert size_of(Small_Escape_Sequence) == 8;
+
+Ansi_Style_Command :: enum {
+    RESET_ALL :: 0;
+
+    BOLD_ON           :: 1;
+    FAINT_ON          :: 2;
+    ITALIC_ON         :: 3;
+    UNDERLINE_ON      :: 4;
+    BLINKING_ON       :: 5;
+    INVERSE_ON        :: 7;
+    HIDDEN_ON         :: 8;
+    STRIKETHROUGH_ON  :: 9;
+
+    BOLD_FAINT_OFF    :: 22;
+    ITALIC_OFF        :: 23;
+    UNDERLINE_OFF     :: 24;
+    BLINKING_OFF      :: 25;
+    INVERSE_OFF       :: 27;
+    HIDDEN_OFF        :: 28;
+    STRIKETHROUGH_OFF :: 29;
+
+    FG_BLACK   :: 30;
+    FG_RED     :: 31;
+    FG_GREEN   :: 32;
+    FG_YELLOW  :: 33;
+    FG_BLUE    :: 34;
+    FG_MAGENTA :: 35;
+    FG_CYAN    :: 36;
+    FG_WHITE   :: 37;
+
+    FG_COLOR   :: 38;
+
+    FG_DEFAULT :: 39;
+
+    BG_BLACK   :: 40;
+    BG_RED     :: 41;
+    BG_GREEN   :: 42;
+    BG_YELLOW  :: 43;
+    BG_BLUE    :: 44;
+    BG_MAGENTA :: 45;
+    BG_CYAN    :: 46;
+    BG_WHITE   :: 47;
+
+    BG_COLOR   :: 48;
+
+    BG_DEFAULT :: 49;
+
+    FG_BRIGHT_BLACK   :: 90;
+    FG_BRIGHT_RED     :: 91;
+    FG_BRIGHT_GREEN   :: 92;
+    FG_BRIGHT_YELLOW  :: 93;
+    FG_BRIGHT_BLUE    :: 94;
+    FG_BRIGHT_MAGENTA :: 95;
+    FG_BRIGHT_CYAN    :: 96;
+    FG_BRIGHT_WHITE   :: 97;
+
+    BG_BRIGHT_BLACK   :: 100;
+    BG_BRIGHT_RED     :: 101;
+    BG_BRIGHT_GREEN   :: 102;
+    BG_BRIGHT_YELLOW  :: 103;
+    BG_BRIGHT_BLUE    :: 104;
+    BG_BRIGHT_MAGENTA :: 105;
+    BG_BRIGHT_CYAN    :: 106;
+    BG_BRIGHT_WHITE   :: 107;
+}
+
+Style :: struct {
+    fg_color: Vector4;
+    bg_color: Vector4;
+    attributes: Style_Attributes;
+}
+
+Style_Attributes :: enum_flags { BOLD; FAINT; ITALIC; UNDERLINE; BLINKING; INVERSE; HIDDEN; STRIKETHROUGH; };
+
+print :: (builder: *String_Builder, sequence: Small_Escape_Sequence) {
+    append(builder, sequence.command_letter);
+    append(builder, "(");
+    count := cast(int) sequence.argument_count;
+    for 0..count - 2
+        print(builder, "%, ", cast(Ansi_Style_Command) sequence.arguments[it]);
+    if sequence.argument_count
+        print(builder, "%", cast(Ansi_Style_Command) sequence.arguments[sequence.argument_count - 1]);
+    append(builder, ")");
+}
+
+evaluate_style_sequence :: (using sequence: Small_Escape_Sequence, using style: *Style, fg_default := Vector4.{}, bg_default := Vector4.{}) {
+    if command_letter != #char "m" return;
+
+    i := 0;
+    while i < argument_count {
+        command := cast(Ansi_Style_Command) arguments[i];
+        if command == {
+            case .RESET_ALL;
+                fg_color = fg_default;
+                bg_color = bg_default;
+                attributes = xx 0;
+            case .BOLD_ON;          attributes |= .BOLD;
+            case .FAINT_ON;         attributes |= .FAINT;
+            case .ITALIC_ON;        attributes |= .ITALIC;
+            case .UNDERLINE_ON;     attributes |= .UNDERLINE;
+            case .BLINKING_ON;      attributes |= .BLINKING;
+            case .INVERSE_ON;       attributes |= .INVERSE;
+            case .HIDDEN_ON;        attributes |= .HIDDEN;
+            case .STRIKETHROUGH_ON; attributes |= .STRIKETHROUGH;
+
+            case .BOLD_FAINT_OFF;    attributes &= ~(.BOLD | .FAINT);
+            case .ITALIC_OFF;        attributes &= ~.ITALIC;
+            case .UNDERLINE_OFF;     attributes &= ~.UNDERLINE;
+            case .BLINKING_OFF;      attributes &= ~.BLINKING;
+            case .INVERSE_OFF;       attributes &= ~.INVERSE;
+            case .HIDDEN_OFF;        attributes &= ~.HIDDEN;
+            case .STRIKETHROUGH_OFF; attributes &= ~.STRIKETHROUGH;
+
+            case .FG_BLACK;   fg_color = color_black;
+            case .FG_RED;     fg_color = color_red;
+            case .FG_GREEN;   fg_color = color_green;
+            case .FG_YELLOW;  fg_color = color_yellow;
+            case .FG_BLUE;    fg_color = color_blue;
+            case .FG_MAGENTA; fg_color = color_magenta;
+            case .FG_CYAN;    fg_color = color_cyan;
+            case .FG_WHITE;   fg_color = color_white;
+            case .FG_COLOR;   log_error("command 38 not implemented yet"); return;
+                // TODO
+                // - 2;{id}
+                // - 5;{r};{g};{b}
+            case .FG_DEFAULT; fg_color = fg_default;
+
+            case .BG_BLACK;   bg_color = color_black;
+            case .BG_RED;     bg_color = color_red;
+            case .BG_GREEN;   bg_color = color_green;
+            case .BG_YELLOW;  bg_color = color_yellow;
+            case .BG_BLUE;    bg_color = color_blue;
+            case .BG_MAGENTA; bg_color = color_magenta;
+            case .BG_CYAN;    bg_color = color_cyan;
+            case .BG_WHITE;   bg_color = color_white;
+            case .BG_COLOR;   log_error("command 48 not implemented yet"); return;
+                // TODO
+                // - 2;{id}
+                // - 5;{r};{g};{b}
+            case .BG_DEFAULT; bg_color = fg_default;
+
+            case .FG_BRIGHT_BLACK;   fg_color = color_black;   log_error("bright colors not supported yet");
+            case .FG_BRIGHT_RED;     fg_color = color_red;     log_error("bright colors not supported yet");
+            case .FG_BRIGHT_GREEN;   fg_color = color_green;   log_error("bright colors not supported yet");
+            case .FG_BRIGHT_YELLOW;  fg_color = color_yellow;  log_error("bright colors not supported yet");
+            case .FG_BRIGHT_BLUE;    fg_color = color_blue;    log_error("bright colors not supported yet");
+            case .FG_BRIGHT_MAGENTA; fg_color = color_magenta; log_error("bright colors not supported yet");
+            case .FG_BRIGHT_CYAN;    fg_color = color_cyan;    log_error("bright colors not supported yet");
+            case .FG_BRIGHT_WHITE;   fg_color = color_white;   log_error("bright colors not supported yet");
+
+            case .BG_BRIGHT_BLACK;   bg_color = color_black;   log_error("bright colors not supported yet");
+            case .BG_BRIGHT_RED;     bg_color = color_red;     log_error("bright colors not supported yet");
+            case .BG_BRIGHT_GREEN;   bg_color = color_green;   log_error("bright colors not supported yet");
+            case .BG_BRIGHT_YELLOW;  bg_color = color_yellow;  log_error("bright colors not supported yet");
+            case .BG_BRIGHT_BLUE;    bg_color = color_blue;    log_error("bright colors not supported yet");
+            case .BG_BRIGHT_MAGENTA; bg_color = color_magenta; log_error("bright colors not supported yet");
+            case .BG_BRIGHT_CYAN;    bg_color = color_cyan;    log_error("bright colors not supported yet");
+            case .BG_BRIGHT_WHITE;   bg_color = color_white;   log_error("bright colors not supported yet");
+            case; log_error("unknown command: %", command);
+        }
+        i += 1;
+    }
+}
+
+parse_escape_sequence :: (s: string) -> Small_Escape_Sequence, bool {
+    if s.count < 3 return .{}, false;
+    if s[0] != #char "\e" return .{}, false;
+    if s[1] != #char "[" return .{}, false;
+
+    result: Small_Escape_Sequence;
+    cursor := 2;
+    parsing_number := false;
+    while cursor < s.count {
+        c := s[cursor];
+        if inline is_alpha(c) {
+            if parsing_number then result.argument_count += 1;
+            result.command_letter = c;
+            break;
+        } else if inline is_digit(c) {
+            arg := *result.arguments[result.argument_count];
+            arg.* = arg.* * 10 + c - #char "0";
+            parsing_number = true;
+        } else if c == #char ";" {
+            if parsing_number {
+                result.argument_count += 1;
+                parsing_number = false;
+            }
+        }
+        cursor += 1;
+    }
+
+    assert(result.command_letter != 0);
+    return result, true;
 }
 
 //
@@ -1736,18 +2188,24 @@ print_date_time_for_log :: (builder: *String_Builder, date_time: Calendar_Time) 
 my_struct_printer :: (builder: *String_Builder, any: Any, struct_printer_data: *void) -> bool {
     printer := get_constant_member_printer(any.type);
     if printer != null {
-        return printer(builder, any, struct_printer_data);
+        return printer(builder, any);
     }
 
     if any.type == type_info(Source_Code_Location) {
         print_source_code_location(builder, xx any.value_pointer);
+        return true;
+    } else if any.type == type_info(Ascii_Or_Hex) {
+        print_ascii_or_hex(builder, xx cast(*Ascii_Or_Hex, any.value_pointer).*);
+        return true;
+    } else if any.type == type_info(Small_Escape_Sequence) {
+        print(builder, cast(*Small_Escape_Sequence, any.value_pointer).*);
         return true;
     }
 
     return false;
 }
 
-Struct_Printer_Type :: #type (*String_Builder, Any, *void) -> bool;
+Struct_Printer_Type :: #type (*String_Builder, Any) -> bool;
 
 get_constant_member_printer :: (base_type: *Type_Info) -> Struct_Printer_Type {
     printer_info :: type_info(Struct_Printer_Type);
@@ -1771,6 +2229,21 @@ get_constant_member_printer :: (base_type: *Type_Info) -> Struct_Printer_Type {
 print_source_code_location :: (builder: *String_Builder, location: *Source_Code_Location) {
     filename := path_filename(location.fully_pathed_filename);
     print(builder, "%:%", filename, location.line_number);
+}
+
+Ascii_Or_Hex :: #type,distinct string;
+
+print_ascii_or_hex :: (builder: *String_Builder, s: string) {
+    for 0..s.count-1 {
+        char := s[it];
+        if char >= #char " " && char <= #char "~" {
+            if char == #char "\\" || char == #char "\""
+                append(builder, "\\");
+            append(builder, char);
+        } else {
+            print_to_builder(builder, "\\x%", FormatInt.{ value = char, base = 16, minimum_digits = 2 });
+        }
+    }
 }
 
 //
@@ -1929,6 +2402,29 @@ advance :: (array: [] u8, bytes: s64) -> result: [] u8 {
     return result;
 }
 
+split_at :: (a: [] $T, i: int) -> ([] T, [] T) {
+    assert(i >= 0, "%", i);
+    assert(i <= a.count, "%", i);
+
+    if i == 0 return .[], a;
+    if i == a.count return a, .[];
+
+    l: [] T = ---;
+    l.data = a.data;
+    l.count = i;
+
+    r: [] T = ---;
+    r.data = a.data + i;
+    r.count = a.count - i;
+
+    return l, r;
+}
+
+split_at :: (s: string, i: int) -> (string, string) {
+    l, r := inline split_at(cast([] u8) s, i);
+    return xx l, xx r;
+}
+
 as_bytes :: (data: *$T, count: s64) -> [] u8 {
     result: [] u8 = ---;
     result.data = xx data;
@@ -2075,3 +2571,4 @@ System :: #import "System";
 #import "File";
 #import "File_Utilities";
 #import "Clipboard";
+#import "Pool";

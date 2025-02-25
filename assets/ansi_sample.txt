@@ -1,0 +1,25 @@
+instance = Instance(i1, listen=127.0.0.1:9507 cluster=cluster-31-5, process.pid=58915)
+
+    [0m[94mdef[39;49;00m [92mcheck_replicated[39;49;00m(instance):[90m[39;49;00m
+        box_replication = instance.eval([33m"[39;49;00m[33mreturn box.cfg.replication[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+>       [94massert[39;49;00m [96mset[39;49;00m(box_replication) == [96mset[39;49;00m([90m[39;49;00m
+            ([33mf[39;49;00m[33m"[39;49;00m[33mpico_service:secret@[39;49;00m[33m{[39;49;00maddr[33m}[39;49;00m[33m"[39;49;00m [94mfor[39;49;00m addr [95min[39;49;00m [i1.listen, i2.listen])[90m[39;49;00m
+        ), instance[90m[39;49;00m
+[1m[31mE       AssertionError: Instance(i1, listen=127.0.0.1:9507 cluster=cluster-31-5, process.pid=58915)[0m
+[1m[31mE       assert == failed. [pytest-clarity diff shown][0m
+[1m[31mE         [0m[0m
+[1m[31mE         [0m[32mLHS[0m vs [31mRHS[0m shown below[0m
+[1m[31mE         [0m[0m
+[1m[31mE         [0m[32mset([0m[37;42m)[0m[0m
+[1m[31mE         [0m[31mset([0m[37;41m[[0m[0m
+[1m[31mE         [0m[31m    'pico_service:secret@127.0.0.1:9507',[0m[0m
+[1m[31mE         [0m[31m    'pico_service:secret@127.0.0.1:9508',[0m[0m
+[1m[31mE         [0m[31m])[0m[0m
+[1m[31mE         [0m[0m
+
+box_replication = []
+i1         = Instance(i1, listen=127.0.0.1:9507 cluster=cluster-31-5, process.pid=58915)
+i2         = Instance(i2, listen=127.0.0.1:9508 cluster=cluster-31-5, process.pid=57537)
+instance   = Instance(i1, listen=127.0.0.1:9507 cluster=cluster-31-5, process.pid=58915)
+
+[1m[31mtest/int/test_joining.py[0m:136: AssertionError
