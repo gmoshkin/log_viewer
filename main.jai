@@ -61,8 +61,7 @@ main :: () {
     Profile();
 
     reload_main_font();
-    load_font("Codetta", *ui_font);
-    assert(ui_font.regular == main_font.regular);
+    load_font("Roboto", *ui_font);
 
     msaa := Simp.prepare_window(window, wanted_msaa = WANTED_MSAA);
     Simp.set_render_target(window);
@@ -131,15 +130,6 @@ scroll_bar_slider_color := #run hex_color("d0d0d0");
 scroll_bar_anchor_min_width := 1.7;
 scroll_bar_effective_slider_color := #run hex_color("b0b0b0");
 scroll_bar_anchor_hover_color := #run hex_color("e0e0e0");
-
-anchor_button_active_color  := #run hex_color("4050d0");
-anchor_button_hover_color   := #run hex_color("404040");
-anchor_line_highlight_color := #run hex_color("404040");
-explicit_anchors: [..] Anchor;
-Anchor :: struct {
-    line_index: s64;
-}
-hovered_anchor_button_line: s64 = -1;
 
 hovered_scroll_bar_anchor_kind: enum { EXPLICIT; SEARCH_MATCH; };
 hovered_scroll_bar_anchor_index: s64 = -1;
@@ -277,16 +267,6 @@ update_and_draw_frame :: () -> bool {
             // }
         }
 
-        else if it.key_code == .MOUSE_BUTTON_RIGHT && it.key_pressed {
-            menu := open_the_popup_menu(mouse, null);
-            popup_menu_push_item(menu, "Lorem");
-            popup_menu_push_item(menu, "ipsum");
-            popup_menu_push_item(menu, "dolor");
-            popup_menu_push_item(menu, "sit");
-            popup_menu_push_item(menu, "amet");
-            request_redraw("popup menu opened");
-        }
-
         // modules/Input doesn't set it.ctrl_pressed for MOUSE_WHEEL :(
         else if it.type == .MOUSE_WHEEL && modifiers == .CTRL && !draggin_scroll_bar {
             ofs := it.wheel_delta / it.typical_wheel_delta;
@@ -357,7 +337,6 @@ update_and_draw_frame :: () -> bool {
             Profile();
         }
     }
-
     // update vertical scroll
     scroll_rows = lerp(scroll_rows, target_scroll_rows, scroll_rows_lerp_factor);
     if abs(scroll_rows - target_scroll_rows) < 0.001 then scroll_rows = target_scroll_rows;
@@ -366,11 +345,14 @@ update_and_draw_frame :: () -> bool {
     scroll_columns = lerp(scroll_columns, target_scroll_columns, scroll_columns_lerp_factor);
     if abs(scroll_columns - target_scroll_columns) < 0.001 then scroll_columns = target_scroll_columns;
 
+    // reset these before doing popup menu, because popup menu sets these up
+    for *active_anchor_segment it.line_index = -1;
+
     // update the popup menu
     {
         menu := *the_popup_menu;
-        menu.flags &= ~.HAS_MOUSE_FOCUS;
         if !draggin_scroll_bar && menu.flags & .OPEN {
+            menu.flags &= ~.HAS_MOUSE_FOCUS;
             handled := do_popup_menu(menu, mouse, handle_click=true, do_draw=false);
             if is_click(.MOUSE_BUTTON_LEFT) && !handled {
                 menu.flags &= ~.OPEN;
@@ -410,17 +392,9 @@ update_and_draw_frame :: () -> bool {
                 }
 
                 if is_click(.MOUSE_BUTTON_LEFT) {
-                    found := false;
-                    for explicit_anchors {
-                        if it.line_index != hover_line_index continue;
-                        remove it;
-                        found = true;
-                        break;
-                    }
-
-                    if !found {
-                        array_add(*explicit_anchors, .{ hover_line_index });
-                    }
+                    anchor_button_toggle(hover_line_index);
+                } else if is_click(.MOUSE_BUTTON_RIGHT) {
+                    anchor_button_open_popup_menu(hover_line_index, mouse);
                 }
             } else if hovered_anchor_button_line != -1 {
                 hovered_anchor_button_line = -1;
@@ -511,40 +485,60 @@ update_and_draw_frame :: () -> bool {
         x_tweak := -3;
         y_tweak := 0;
 
-        // hovered anchor button
-        if hovered_anchor_button_line != -1 {
-            pad := 1;
-            color := anchor_button_hover_color;
-            h := main_font.line_height - 2 * pad;
-            w := h;
-            x := rect.left + rect.width - w - pad + x_tweak;
+        parent_top := top(rect) + y_tweak;
+        H := main_font.line_height;
+        parent_right := right(rect) + x_tweak;
 
-            row_index := hovered_anchor_button_line - scroll_rows;
-            y_line := rect.top - (row_index + 1) * main_font.line_height + y_tweak;
-            y := y_line + pad;
+        // hovered anchor segment
+        if active_anchor_segment[0].line_index != -1 || active_anchor_segment[1].line_index != -1 {
+            above_line_index := active_anchor_segment[0].line_index;
+            bellow_line_index := active_anchor_segment[1].line_index;
+            // This makes perfect sense!
+            assert(above_line_index <= bellow_line_index);
 
-            // draw_axis_aligned_rectangle(xx (rect.left + rect.width - main_font.line_height),
-            //                             xx y_line,
-            //                             xx main_font.line_height, xx main_font.line_height, hex_color("000000"));
-            draw_hollow_axis_aligned_rectangle(xx x, xx y, xx w, xx h, border = 2, color);
+            color := anchor_button_active_color;
+            w := 4.0;
+            x_middle := parent_right - H / 2.0;
+            x := x_middle - w / 2.0;
+
+            y_top := parent_top - (above_line_index - scroll_rows + 0.5) * H + w / 2;
+            y_bottom := parent_top - (bellow_line_index - scroll_rows + 0.5) * H - w / 2;
+            h := y_top - y_bottom;
+
+            draw_axis_aligned_rectangle(xx x, xx y_bottom, xx w, xx h, color);
         }
 
-        // TODO handle search matches similarly
+        // hovered anchor button
+        if hovered_anchor_button_line != -1 {
+            color := anchor_button_hover_color;
+            pad := 1;
+            h := H - 2 * pad;
+            w := h;
+            x := parent_right - w - pad;
+
+            row_index := hovered_anchor_button_line - scroll_rows;
+            y_line := parent_top - (row_index + 1) * H;
+            y := y_line + pad;
+
+            // draw_axis_aligned_rectangle(xx (parent_right - H), xx y_line, xx H, xx H, hex_color("000000"));
+            draw_hollow_axis_aligned_rectangle(xx x, xx y, xx w, xx h, border = 2, color);
+        }
 
         // active anchor buttons
         {
             color := anchor_button_active_color;
             pad := 4;
-            h := main_font.line_height - 2 * pad;
+            h := H - 2 * pad;
             w := h;
-            x := rect.left + rect.width - w - pad + x_tweak;
+            x := parent_right - w - pad;
             for explicit_anchors {
                 row_index := it.line_index - scroll_rows;
                 // -1 because want to draw half the button at the top of the screen (bad wording)
                 if row_index < -1 continue;
-                if row_index > xx (rect.height * main_font.line_height) continue;
+                // LOL this is wrong
+                if row_index > xx (rect.height * H) continue;
 
-                y_line := rect.top - (row_index + 1) * main_font.line_height + y_tweak;
+                y_line := parent_top - (row_index + 1) * H;
                 y := y_line + pad;
                 draw_axis_aligned_rectangle(xx x, xx y, xx w, xx h, color);
             }
@@ -776,8 +770,10 @@ get_scroll_bar_triangle :: ($$t: float, x: float, y: float, $x_tweak := 2.0) -> 
 // text pane stuff
 //
 
-main_text_pane_text_color       :: #run hex_color("e0e0e0");
-main_text_pane_background_color :: #run hex_color("202020");
+main_text_pane_text_color           :: #run hex_color("e0e0e0");
+main_text_pane_dim_text_color       :: #run hex_color("909090");
+main_text_pane_background_color     :: #run hex_color("202020");
+main_text_pane_dim_background_color :: #run hex_color("404040");
 
 draw_the_text_pane :: (rect: Rectangle) {
     text_color       := main_text_pane_text_color;
@@ -807,6 +803,9 @@ draw_the_text_pane :: (rect: Rectangle) {
         text_y_tweak := -(main_font.typical_descender + main_font.max_descender) / 2.0;
 
         current_ansi_style := Style.{ fg_color = text_color };
+        override_ansi_style: Style;
+        anchor_segment_first := active_anchor_segment[0].line_index;
+        anchor_segment_last := active_anchor_segment[1].line_index;
 
         search_matches_cursor := 0;
         line_index := 0;
@@ -817,6 +816,54 @@ draw_the_text_pane :: (rect: Rectangle) {
             defer y -= h;
             if y > xx rect.top continue;
             if y < xx (rect.top - rect.height - h) continue;
+
+            // handle log line info
+            info := *text_buffer_line_infos[line_index];
+            color := text_color;
+            if info.source_id != SOURCE_ID_UNKNOWN {
+                color = get_log_source_color(info.source_id);
+            }
+
+            // handle anchor segment
+            inside_anchor_segment := (line_index >= anchor_segment_first) && (line_index <= anchor_segment_last);
+            if inside_anchor_segment {
+                color = main_text_pane_dim_text_color;
+                override_ansi_style.fg_color = color;
+                override_ansi_style.bg_color = main_text_pane_dim_background_color;
+
+                draw_axis_aligned_rectangle(xx x, xx y, xx rect.width, xx main_font.line_height, main_text_pane_dim_background_color);
+            } else {
+                override_ansi_style = .{};
+            }
+
+            n_columns_to_skip := cast(int) floor(scroll_columns);
+            x_tweak := (scroll_columns - n_columns_to_skip) * main_font.mono_width;
+
+            // if line_index % 2 == 0
+            //     draw_axis_aligned_rectangle(xx x, xx y, xx rect.width, xx main_font.line_height, hex_color("005050"));
+
+            if xx line.count > scroll_columns {
+                font := main_font.regular;
+                if line_index == hover_line_index {
+                    font = main_font.bold;
+                }
+
+                if info.escape_codes_count != 0 {
+                    codes := array_view(text_buffer_escape_code_infos, info.escape_codes_start, info.escape_codes_count);
+                    draw_text_line_with_ansi_escape_codes(main_font, line, n_columns_to_skip, xx pane_width_in_characters,
+                                                          x, -x_tweak, y, text_y_tweak, color, codes, *current_ansi_style, override_ansi_style);
+                } else {
+                    line = advance(line, n_columns_to_skip);
+                    line.count = min(line.count, xx pane_width_in_characters);
+
+                    // TODO: tabs handling (I fucking hate tabs!!!!)
+                    w_text := Simp.prepare_text(font, line);
+                    // This fails for unicode!
+                    // assert(w_text == main_font.mono_width * line.count);
+
+                    Simp.draw_prepared_text(font, xx (x - x_tweak), xx (y + text_y_tweak), color);
+                }
+            }
 
             anchored := false;
             for explicit_anchors if it.line_index == line_index { anchored = true; break; }
@@ -829,41 +876,6 @@ draw_the_text_pane :: (rect: Rectangle) {
                 y_top := y + main_font.line_height + y_tweak;
                 draw_axis_aligned_rectangle(xx x, xx y_bottom, xx w, 2, anchor_line_highlight_color);
                 draw_axis_aligned_rectangle(xx x, xx y_top,    xx w, 2, anchor_line_highlight_color);
-            }
-
-            n_columns_to_skip := cast(int) floor(scroll_columns);
-            x_tweak := (scroll_columns - n_columns_to_skip) * main_font.mono_width;
-
-            // if line_index % 2 == 0
-            //     draw_axis_aligned_rectangle(xx x, xx y, xx rect.width, xx main_font.line_height, hex_color("005050"));
-
-            if xx line.count > scroll_columns {
-                info := *text_buffer_line_infos[line_index];
-                color := text_color;
-                if info.source_id != SOURCE_ID_UNKNOWN {
-                    color = get_log_source_color(info.source_id);
-                }
-
-                font := main_font.regular;
-                if line_index == hover_line_index {
-                    font = main_font.bold;
-                }
-
-                if info.escape_codes_count != 0 {
-                    codes := array_view(text_buffer_escape_code_infos, info.escape_codes_start, info.escape_codes_count);
-                    draw_text_line_with_ansi_escape_codes(main_font, line, n_columns_to_skip, xx pane_width_in_characters,
-                                                          x, -x_tweak, y, text_y_tweak, color, codes, *current_ansi_style);
-                } else {
-                    line = advance(line, n_columns_to_skip);
-                    line.count = min(line.count, xx pane_width_in_characters);
-
-                    // TODO: tabs handling (I fucking hate tabs!!!!)
-                    w_text := Simp.prepare_text(font, line);
-                    // This fails for unicode!
-                    // assert(w_text == main_font.mono_width * line.count);
-
-                    Simp.draw_prepared_text(font, xx (x - x_tweak), xx (y + text_y_tweak), color);
-                }
             }
 
             // handle search match
@@ -882,7 +894,7 @@ draw_text_line_with_ansi_escape_codes :: (font_set: My_Dynamic_Font, text: strin
                                           left: float, text_x_tweak: float,
                                           bottom: float, text_y_tweak: float,
                                           default_color: Vector4, codes: [] Escape_Code_Info,
-                                          current_style: *Style)
+                                          current_style: *Style, override_style: Style)
 {
     current_invisible_before: u16 = 0;
 
@@ -927,6 +939,7 @@ draw_text_line_with_ansi_escape_codes :: (font_set: My_Dynamic_Font, text: strin
         defer i += 1;
         it := segments[i];
 
+        // truncate text to fit in screen
         visible_start := it.start - it.invisible_before;
         if visible_start >= stop break;
         visible_end := visible_start + it.count;
@@ -935,11 +948,15 @@ draw_text_line_with_ansi_escape_codes :: (font_set: My_Dynamic_Font, text: strin
 
         x := left + character_width * (visible_start - n_columns_to_skip) + text_x_tweak;
 
+        // choose color
         fg_color := it.style.fg_color;
+        if override_style.fg_color.w > 0 then fg_color = override_style.fg_color;
         bg_color := it.style.bg_color;
+        if override_style.bg_color.w > 0 then bg_color = override_style.bg_color;
         if it.style.attributes & .INVERSE then inline Swap(*fg_color, *bg_color);
 
-        if bg_color.w != 0 {
+        // draw background
+        if bg_color.w > 0 {
             w := character_width * it.count;
             draw_axis_aligned_rectangle(xx x, xx bottom, xx w, xx line_height, bg_color);
         }
@@ -1671,6 +1688,116 @@ draw_text_search_ui :: (rect: Rectangle, font: My_Dynamic_Font) {
 }
 
 //
+// anchor buttons
+//
+
+anchor_button_active_color  := #run hex_color("4050d0");
+anchor_button_hover_color   := #run hex_color("404040");
+anchor_line_highlight_color := #run hex_color("404040");
+explicit_anchors: [..] Anchor;
+Anchor :: struct {
+    line_index: s64;
+}
+hovered_anchor_button_line: s64 = -1;
+active_anchor_segment: [2] Anchor;
+
+anchor_button_toggle :: (line_index: int) {
+    anchor_index := -1;
+    for explicit_anchors if it.line_index == line_index {
+        anchor_index = it_index;
+        break;
+    }
+
+    // FIXME: just use procedures which preserve order
+    if anchor_index != -1 {
+        array_unordered_remove_by_index(*explicit_anchors, anchor_index);
+    } else {
+        array_add(*explicit_anchors, .{line_index});
+    }
+    quick_sort(explicit_anchors, (l, r) => l.line_index - r.line_index);
+
+    request_redraw("anchor button toggle");
+}
+
+anchor_button_open_popup_menu :: (line_index: int, mouse: Vector2) {
+    anchor := Anchor.{-1};
+    anchor_above := Anchor.{-1};   // I'm not stupid, this line is above
+    anchor_bellow := Anchor.{-1};  // this one on the monitor
+    for explicit_anchors {
+        if it.line_index < line_index      then anchor_above = it;
+        else if it.line_index > line_index then anchor_bellow = it;
+                                           else anchor = it;
+    }
+
+    data := Anchor_Button_Popup_Menu_Callback_Data.{line_index, anchor, anchor_above, anchor_bellow};
+    menu := open_the_popup_menu(mouse, anchor_button_popup_menu_callback, data);
+
+    using Anchor_Button_Popup_Menu_Item_Id;
+    active := (anchor.line_index != -1);
+    if active then popup_menu_push_item(menu, "Remove anchor", id=xx TOGGLE);
+              else popup_menu_push_item(menu, "Add anchor", id=xx TOGGLE);
+
+    popup_menu_push_item(menu, "Delete 1 line", id=xx DELETE_1_LINE);
+
+    if anchor_above.line_index != -1 then popup_menu_push_item(menu, "Delete lines up (to anchor)", id=xx DELETE_LINES_UP);
+                                     else popup_menu_push_item(menu, "Delete lines up", id=xx DELETE_LINES_UP);
+
+    if anchor_bellow.line_index != -1 then popup_menu_push_item(menu, "Delete lines down (to anchor)", id=xx DELETE_LINES_DOWN);
+                                      else popup_menu_push_item(menu, "Delete lines down", id=xx DELETE_LINES_DOWN);
+
+    request_redraw("popup menu opened");
+}
+
+Anchor_Button_Popup_Menu_Callback_Data :: struct {
+    line_index: int;
+    anchor: Anchor;
+    anchor_above: Anchor;
+    anchor_bellow: Anchor;
+}
+
+Anchor_Button_Popup_Menu_Item_Id :: enum {
+    TOGGLE;
+    DELETE_1_LINE;
+    DELETE_LINES_UP;
+    DELETE_LINES_DOWN;
+}
+
+anchor_button_popup_menu_callback :: (menu: *Popup_Menu, event: Popup_Menu_Event) {
+    assert(menu.callback_data.type == type_info(Anchor_Button_Popup_Menu_Callback_Data));
+    data := cast(*Anchor_Button_Popup_Menu_Callback_Data) menu.callback_data.value_pointer;
+
+    item := menu.items[menu.hovered_item];
+    command := cast(Anchor_Button_Popup_Menu_Item_Id) item.id;
+    if event == {
+        case .CLICK;
+            if #complete command == {
+                case .TOGGLE;
+                    anchor_button_toggle(data.line_index);
+
+                case .DELETE_1_LINE;     log_error("delete 1 line not implemented yet");
+                case .DELETE_LINES_UP;   log_error("delete lines up not implemented yet");
+                case .DELETE_LINES_DOWN; log_error("delete lines down not implemented yet");
+            }
+        case .HOVER;
+            if command == {
+                case .DELETE_1_LINE;
+                    active_anchor_segment[0] = .{data.line_index};
+                    active_anchor_segment[1] = .{data.line_index};
+                case .DELETE_LINES_UP;
+                    anchor := data.anchor_above;
+                    if anchor.line_index == -1 then anchor.line_index = 0;
+                    active_anchor_segment[0] = anchor;
+                    active_anchor_segment[1] = .{data.line_index};
+                case .DELETE_LINES_DOWN;
+                    active_anchor_segment[0] = .{data.line_index};
+                    anchor := data.anchor_bellow;
+                    if anchor.line_index == -1 then anchor.line_index = text_buffer_line_infos.count - 1;
+                    active_anchor_segment[1] = anchor;
+            }
+    }
+}
+
+//
 // ui primitives
 //
 
@@ -1681,17 +1808,22 @@ Popup_Menu :: struct {
     hovered_item: s16 = -1;
     flags: enum_flags { OPEN; HAS_MOUSE_FOCUS; };
 
-    on_click: #type (menu: *Popup_Menu);
+    callback: Popup_Menu_Callback;
+    callback_data: Any;
 
     pool: Pool;
     allocator: Allocator;
 }
+
+Popup_Menu_Callback :: #type (menu: *Popup_Menu, event: Popup_Menu_Event);
+Popup_Menu_Event :: enum { CLICK; HOVER; }
 
 the_popup_menu: Popup_Menu;
 
 Popup_Menu_Item :: struct {
     icon: Icon_Info;
     text: string;
+    id: int;
 }
 
 Icon_Info :: struct {
@@ -1710,10 +1842,24 @@ has_focus :: (menu: *Popup_Menu) -> bool #expand {
     return menu.flags & .HAS_MOUSE_FOCUS != 0;
 }
 
-open_the_popup_menu :: (at: Vector2, on_click: type_of(Popup_Menu.on_click)) -> *Popup_Menu {
+open_the_popup_menu :: inline (at: Vector2, callback: Popup_Menu_Callback) -> *Popup_Menu {
+    return open_the_popup_menu(at, callback, null);
+}
+
+open_the_popup_menu :: (at: Vector2, callback: Popup_Menu_Callback, callback_data: $T) -> *Popup_Menu {
     menu := *the_popup_menu;
     array_reset(*menu.items);
     reset(*menu.pool);
+
+    menu.callback = callback;
+    info :: type_info(T);
+    #if info.type == .POINTER || info.type == .STRING {
+        menu.callback_data = callback_data;
+    } else {
+        menu.callback_data.type = info;
+        menu.callback_data.value_pointer = get(*menu.pool, size_of(T));
+        cast(*T, menu.callback_data.value_pointer).* = callback_data;
+    }
 
     menu.left = at.x;
     menu.top = at.y;
@@ -1722,20 +1868,19 @@ open_the_popup_menu :: (at: Vector2, on_click: type_of(Popup_Menu.on_click)) -> 
     return menu;
 }
 
-popup_menu_push_item :: (menu: *Popup_Menu, format: string, args: .. Any) {
+popup_menu_push_item :: (menu: *Popup_Menu, format: string, args: .. Any, id := -1) {
     text := sprint(format, ..args,, menu.allocator);
-    array_add(*menu.items, Popup_Menu_Item.{text = text});
+    array_add(*menu.items, Popup_Menu_Item.{text = text, id = id});
 }
 
 popup_menu_handle_click :: (menu: *Popup_Menu) {
     item := menu.hovered_item;
-    log("you clicked %", menu.items[item].text);
 
-    if menu.on_click {
-        menu.on_click(menu);
+    if menu.callback {
+        menu.callback(menu, .CLICK);
     }
 
-    menu.flags &= ~.OPEN;
+    menu.flags &= ~(.OPEN | .HAS_MOUSE_FOCUS);
 }
 
 do_popup_menu :: (menu: *Popup_Menu, mouse: Vector2, handle_click: bool, $do_draw := false) -> input_handled: bool {
@@ -1795,6 +1940,8 @@ do_popup_menu :: (menu: *Popup_Menu, mouse: Vector2, handle_click: bool, $do_dra
             if click {
                 popup_menu_handle_click(menu);
                 handled = true;
+            } else if menu.callback {
+                menu.callback(menu, .HOVER);
             }
         }
 
@@ -2539,6 +2686,51 @@ array_insert_at :: (array: *[..] $T, items: [] T, index: int) {
     memcpy(array.data + index, items.data, items.count * size_of(T));
 }
 
+// Stole this from modules/Sort. Minor changes.
+// @Speed: This version of quick_sort (and probably the other one)
+// seems to compare items to themselves a lot, which is clearly pointless.
+// Fix that!
+quick_sort :: inline (array: [] $T, $f: (T, T) -> $R) -> [] T {  // R is an integer type, but may be e.g. 32-bit.
+    quicksort_helper :: (a: *T, n: s64) {
+        if n < 2 return;
+
+        p := a[n / 2];
+
+        i := 0;
+        j := n-1;
+
+        while true {
+            while f(a[i], p) < 0  {i += 1;}
+            while f(p, a[j]) < 0  {j -= 1;}
+
+            if i >= j break;
+
+            t := a[i];
+            a[i] = a[j];
+            a[j] = t;
+
+            i += 1;
+            j -= 1;
+        }
+
+        quicksort_helper(a, i);
+        quicksort_helper(a + i, n - i);
+    }
+
+    quicksort_helper(array.data, array.count);
+    return array;
+}
+
+test_quick_sort :: () {
+    array := int.[6, 1, 3, 5, 2, 4, 7, 0];
+    quick_sort(array, (l, r) => l - r);
+    assert(array_equals(array, .[0, 1, 2, 3, 4, 5, 6, 7]));
+
+    array = int.[6, 1, 3, 5, 2, 4, 7, 0];
+    quick_sort(array, (l, r) => r - l);
+    assert(array_equals(array, .[7, 6, 5, 4, 3, 2, 1, 0]));
+}
+
 test_array_insert_at :: () {
     array: [..] int;
 
@@ -2745,8 +2937,9 @@ pretty_assert :: (code: Code, loc := #caller_location) #expand {
 //
 
 run_tests :: () {
-    // test_search_for_match();
+    test_search_for_match();
     test_array_insert_at();
+    test_quick_sort();
 }
 
 WANTED_MSAA :: 8;
