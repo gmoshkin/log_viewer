@@ -4,7 +4,14 @@ EXE_NAME :: "log_viewer";
 
 TODO:
 
-- removing garbage text
+- removing garbage text:
+  the idea is such:
+    - put 2 anchors
+    - mouse hovers over anchor -> a connection line is shown connecting two
+                                  adjacent anchors closest to mouse
+    - interact with connection line to
+        - delete range of text
+        - hide range of text
 - log parsing + semantic highlighting
 - filterring? I'm not sure yet what I want/need
 - status bar
@@ -46,13 +53,16 @@ main :: () {
     escape_code_stats_allocator = .{pool_allocator_proc, *escape_code_stats_pool};
     init(*escape_code_stats,, escape_code_stats_allocator);
 
+    set_allocators(*the_popup_menu.pool);
+    the_popup_menu.allocator = .{pool_allocator_proc, *the_popup_menu.pool};
+
     Profile();
     load_text_buffer_data(input_from_clipboard);
     Profile();
 
     reload_main_font();
-    debug_font = Simp.get_font_at_size(assets_directory, "Codetta-Regular.ttf", 14);
-    assert(debug_font == main_font.regular);
+    load_font("Codetta", *ui_font);
+    assert(ui_font.regular == main_font.regular);
 
     msaa := Simp.prepare_window(window, wanted_msaa = WANTED_MSAA);
     Simp.set_render_target(window);
@@ -78,6 +88,7 @@ window_size: Vector2;
 mouse: Vector2;
 mouse_last_frame: Vector2;
 mouse_at_click: Vector2;
+mouse_event_handled: bool;
 window_rect: Rectangle;
 
 assets_directory: string;
@@ -95,8 +106,9 @@ main_font := My_Dynamic_Font.{
     pixel_height = 14,
 };
 
-debug_font: *Simp.Dynamic_Font;
-debug_text_color := #run hex_color("dddddd");
+ui_font := My_Dynamic_Font.{
+    pixel_height = 14,
+};
 
 text_pane_rect: Rectangle;
 left_column_rect: Rectangle;
@@ -109,6 +121,8 @@ scroll_rows_at_click := 0.0;
 scroll_columns := 0.0;
 target_scroll_columns := 0.0;
 scroll_columns_lerp_factor := 0.5;
+
+window_bg_color :: #run hex_color("191919");
 
 draggin_scroll_bar := false;
 scroll_bar_rect: Rectangle;
@@ -160,6 +174,7 @@ update_and_draw_frame :: () -> bool {
         }
     }
     defer mouse_last_frame = mouse;
+    mouse_event_handled = false;
 
     //
     // update rectangles dependent on window size
@@ -262,6 +277,16 @@ update_and_draw_frame :: () -> bool {
             // }
         }
 
+        else if it.key_code == .MOUSE_BUTTON_RIGHT && it.key_pressed {
+            menu := open_the_popup_menu(mouse, null);
+            popup_menu_push_item(menu, "Lorem");
+            popup_menu_push_item(menu, "ipsum");
+            popup_menu_push_item(menu, "dolor");
+            popup_menu_push_item(menu, "sit");
+            popup_menu_push_item(menu, "amet");
+            request_redraw("popup menu opened");
+        }
+
         // modules/Input doesn't set it.ctrl_pressed for MOUSE_WHEEL :(
         else if it.type == .MOUSE_WHEEL && modifiers == .CTRL && !draggin_scroll_bar {
             ofs := it.wheel_delta / it.typical_wheel_delta;
@@ -341,10 +366,25 @@ update_and_draw_frame :: () -> bool {
     scroll_columns = lerp(scroll_columns, target_scroll_columns, scroll_columns_lerp_factor);
     if abs(scroll_columns - target_scroll_columns) < 0.001 then scroll_columns = target_scroll_columns;
 
+    // update the popup menu
+    {
+        menu := *the_popup_menu;
+        menu.flags &= ~.HAS_MOUSE_FOCUS;
+        if !draggin_scroll_bar && menu.flags & .OPEN {
+            handled := do_popup_menu(menu, mouse, handle_click=true, do_draw=false);
+            if is_click(.MOUSE_BUTTON_LEFT) && !handled {
+                menu.flags &= ~.OPEN;
+                request_redraw("popup menu closed");
+            }
+            mouse_event_handled ||= handled;
+        }
+    }
+
     //
     // drag scroll bar
     //
     if draggin_scroll_bar {
+        mouse_event_handled = true;
         mouse_moved := mouse.y - mouse_at_click.y;
         scroll_rows = scroll_rows_at_click - xx (mouse_moved * lines_per_scroll_bar_pixel);
         scroll_rows = clamp(scroll_rows, 0, total_line_count - text_pane_row_count / 2.0);
@@ -361,7 +401,7 @@ update_and_draw_frame :: () -> bool {
     // update anchor buttons
     //
     {
-        if !draggin_scroll_bar && axis_aligned_rectangle_contains(left_column_rect, mouse) {
+        if !mouse_event_handled && !has_focus(*the_popup_menu) && axis_aligned_rectangle_contains(left_column_rect, mouse) {
             hover_line_index := screen_position_to_line_index(left_column_rect, mouse.y);
             if hover_line_index >= 0 {
                 if hover_line_index != hovered_anchor_button_line {
@@ -397,7 +437,7 @@ update_and_draw_frame :: () -> bool {
     //
     // update scroll bar anchors
     //
-    if !draggin_scroll_bar {
+    if !mouse_event_handled && !has_focus(*the_popup_menu) {
         anchor_kind := hovered_scroll_bar_anchor_kind;
         // I'm not actually sure this is needed...
         mouse_in_rect := mouse - .{xx scroll_bar_rect.left, xx bottom(scroll_bar_rect)};
@@ -451,7 +491,7 @@ update_and_draw_frame :: () -> bool {
     //
 
     Simp.update_window(window);
-    base_color := hex_color("191919");
+    base_color := window_bg_color;
     Simp.clear_render_target(base_color.x, base_color.y, base_color.z, 1);
 
     Simp.set_shader_for_color();
@@ -536,6 +576,7 @@ update_and_draw_frame :: () -> bool {
         color := scroll_bar_slider_color;
         if is_click(.MOUSE_BUTTON_LEFT) && axis_aligned_rectangle_contains(xx x, xx y, xx w, xx h, mouse) {
             draggin_scroll_bar = true;
+            mouse_event_handled = true;
             scroll_rows_at_click = scroll_rows;
             request_redraw(tprint("scroll bar at %", #line));
         }
@@ -595,10 +636,15 @@ update_and_draw_frame :: () -> bool {
         }
     }
 
+    // draw the popup menu
+    if the_popup_menu.flags & .OPEN {
+        do_popup_menu(*the_popup_menu, mouse, handle_click=false, do_draw=true);
+    }
+
     // debuggin pane
     {
         rect := window_rect;
-        font := debug_font;
+        font := ui_font.regular;
         x := right(window_rect) - 300;
         y := window_rect.top - 4;
 
@@ -730,8 +776,8 @@ get_scroll_bar_triangle :: ($$t: float, x: float, y: float, $x_tweak := 2.0) -> 
 // text pane stuff
 //
 
-main_text_pane_text_color       := #run hex_color("e0e0e0");
-main_text_pane_background_color := #run hex_color("202020");
+main_text_pane_text_color       :: #run hex_color("e0e0e0");
+main_text_pane_background_color :: #run hex_color("202020");
 
 draw_the_text_pane :: (rect: Rectangle) {
     text_color       := main_text_pane_text_color;
@@ -743,7 +789,7 @@ draw_the_text_pane :: (rect: Rectangle) {
     }
 
     hover_line_index := -1;
-    if axis_aligned_rectangle_contains(rect, mouse) {
+    if !has_focus(*the_popup_menu) && axis_aligned_rectangle_contains(rect, mouse) {
         hover_line_index = screen_position_to_line_index(rect, mouse.y);
     }
 
@@ -1426,11 +1472,11 @@ text_search_builder: String_Builder;
 text_search_string: string;
 text_search_ui_rect: Rectangle;
 
-text_search_ui_background_color := #run hex_color("181818");
-text_search_ui_border_color := #run hex_color("303030");
-text_search_ui_cursor_color := #run hex_color("ffffff");
-text_search_ui_text_color := #run hex_color("ffffff");
-text_search_ui_border_width := 3.0;
+text_search_ui_background_color :: #run hex_color("181818");
+text_search_ui_border_color :: #run hex_color("303030");
+text_search_ui_cursor_color :: #run hex_color("ffffff");
+text_search_ui_text_color :: #run hex_color("ffffff");
+text_search_ui_border_width :: 3.0;
 
 text_input_cursor: s64;
 text_input_buffer: [..] u8;
@@ -1620,13 +1666,150 @@ draw_text_search_ui :: (rect: Rectangle, font: My_Dynamic_Font) {
         w := 2;
         h := font.line_height;
 
-        draw_axis_aligned_rectangle(xx x, xx y, xx w, xx h, text_search_ui_cursor_color);
+        draw_axis_aligned_rectangle(x, y, xx w, xx h, text_search_ui_cursor_color);
     }
 }
 
 //
 // ui primitives
 //
+
+Popup_Menu :: struct {
+    top: float;
+    left: float;
+    items: [..] Popup_Menu_Item;
+    hovered_item: s16 = -1;
+    flags: enum_flags { OPEN; HAS_MOUSE_FOCUS; };
+
+    on_click: #type (menu: *Popup_Menu);
+
+    pool: Pool;
+    allocator: Allocator;
+}
+
+the_popup_menu: Popup_Menu;
+
+Popup_Menu_Item :: struct {
+    icon: Icon_Info;
+    text: string;
+}
+
+Icon_Info :: struct {
+    // TODO: support images
+    color: Vector4;
+    type: enum { NONE; CROSS; }
+}
+
+popup_menu_border_color :: text_search_ui_border_color;
+popup_menu_border_width :: 2.0;
+popup_menu_hovered_item_bg_color :: #run hex_color("505050");
+popup_menu_item_bg_color :: text_search_ui_background_color;
+popup_menu_item_text_color :: main_text_pane_text_color;
+
+has_focus :: (menu: *Popup_Menu) -> bool #expand {
+    return menu.flags & .HAS_MOUSE_FOCUS != 0;
+}
+
+open_the_popup_menu :: (at: Vector2, on_click: type_of(Popup_Menu.on_click)) -> *Popup_Menu {
+    menu := *the_popup_menu;
+    array_reset(*menu.items);
+    reset(*menu.pool);
+
+    menu.left = at.x;
+    menu.top = at.y;
+    menu.flags |= .OPEN;
+
+    return menu;
+}
+
+popup_menu_push_item :: (menu: *Popup_Menu, format: string, args: .. Any) {
+    text := sprint(format, ..args,, menu.allocator);
+    array_add(*menu.items, Popup_Menu_Item.{text = text});
+}
+
+popup_menu_handle_click :: (menu: *Popup_Menu) {
+    item := menu.hovered_item;
+    log("you clicked %", menu.items[item].text);
+
+    if menu.on_click {
+        menu.on_click(menu);
+    }
+
+    menu.flags &= ~.OPEN;
+}
+
+do_popup_menu :: (menu: *Popup_Menu, mouse: Vector2, handle_click: bool, $do_draw := false) -> input_handled: bool {
+    font := ui_font;
+    assert(menu.flags & .OPEN != 0);
+
+    text_color := main_text_pane_text_color;
+
+    h := font.line_height;
+    text_y_tweak := -(font.typical_descender + font.max_descender) / 2;
+    x_pad := text_y_tweak;
+    text_x_tweak := h + x_pad;
+
+    text_w_max := 0;
+    for menu.items {
+        text_w := Simp.prepare_text(font.regular, it.text);
+        text_w_max = max(text_w, text_w_max);
+    }
+
+    b := popup_menu_border_width;
+    X := menu.left;
+    H := h * menu.items.count;
+    Y := menu.top - H + 1;
+    W := text_w_max + text_x_tweak + x_pad;
+
+    overflow := 0 - (Y - b);                if overflow > 0 { menu.top += overflow; Y += overflow; }
+    overflow = (Y + H + b) - window_size.y; if overflow > 0 { menu.top -= overflow; Y -= overflow; }
+    overflow = 0 - (X - b);                 if overflow > 0 { menu.left += overflow; X += overflow; }
+    overflow = (X + W + b) - window_size.x; if overflow > 0 { menu.left -= overflow; X -= overflow; }
+
+    //
+    // draw background rect
+    //
+    #if do_draw {
+        draw_axis_aligned_rectangle(xx X, xx Y, xx W, xx H, popup_menu_item_bg_color);
+        draw_hollow_axis_aligned_rectangle(X - b, Y - b, W + 2 * b, H + 2 * b, b, popup_menu_border_color);
+    }
+
+    click := handle_click && is_click(.MOUSE_BUTTON_LEFT);
+    if axis_aligned_rectangle_contains(X, Y, xx W, xx H, mouse) {
+        menu.flags |= .HAS_MOUSE_FOCUS;
+    }
+
+    handled := false;
+
+    // draw the text
+    x := menu.left;
+    y_top := menu.top;
+    for menu.items {
+        y_bottom := y_top - h;
+        defer y_top = y_bottom;
+
+        hover := false;
+        if has_focus(menu) && (mouse.y >= y_bottom && mouse.y < y_top) {
+            hover = true;
+            menu.hovered_item = xx it_index;
+            if click {
+                popup_menu_handle_click(menu);
+                handled = true;
+            }
+        }
+
+        // TODO draw icon
+        #if do_draw {
+            if hover {
+                draw_axis_aligned_rectangle(xx X, xx y_bottom, xx W, xx h, popup_menu_hovered_item_bg_color);
+            }
+
+            Simp.draw_text(font.regular, xx x + text_x_tweak, xx y_bottom + text_y_tweak, it.text, popup_menu_item_text_color);
+        }
+    }
+
+    return handled;
+}
 
 draw_simple_text_pane :: (parent_rect: Rectangle, font: *Simp.Dynamic_Font, left: s64, top: s64, text: string, text_color: Vector4, background_color: Vector4) {
     if !text return;
