@@ -5,25 +5,6 @@ EXE_NAME :: "log_viewer";
 TODO:
 
 - log parsing + semantic highlighting
-   - show time graph of logs on screen, something like this:
-    always start at zero and end at windows.x
-     \
-      \
-      |
-      \__
-         \
-          \__
-             \
-              \
-               |
-               |
-               \_
-                 \_
-                   \_
-                     \__
-                        \___
-                            \____
-                                 \
 - preview line at scroll bar anchor hovered over with mouse
 - filterring/hiding? I'm not sure yet what I want/need
 - status bar
@@ -705,9 +686,10 @@ update_and_draw_frame :: () -> bool {
         if text_search_ui_open print(*builder, "search matches: %\n", search_results.matches.count);
         if hovered_scroll_bar_anchor_index != -1 then print(*builder, "% %\n", hovered_scroll_bar_anchor_kind, hovered_scroll_bar_anchor_index);
         // if text_search_ui_open print(*builder, "case-insensitive: %\n", search_results.case_insensitive);
+        print(*builder, "t min: "); print_time_for_log(*builder, to_calendar(global_time_range_min)); print(*builder, "\n");
+        print(*builder, "t cur: "); print_time_for_log(*builder, to_calendar(global_time_current_line)); print(*builder, "\n");
+        print(*builder, "t max: "); print_time_for_log(*builder, to_calendar(global_time_range_max)); print(*builder, "\n");
         for redraw_reasons print(*builder, "%\n", it);
-        // print(*builder, "mouse_from_top: %\n", rect.top - mouse.y);
-        // print(*builder, "main_font_line_height: %\n", main_font.line_height);
 
         pane_text := builder_to_string(*builder,, temp);
         draw_simple_text_pane(rect, font, x, y, pane_text, hex_color("ffffff"), hex_color("181818"));
@@ -828,6 +810,11 @@ main_text_pane_dim_text_color       :: #run hex_color("909090");
 main_text_pane_background_color     :: #run hex_color("202020");
 main_text_pane_dim_background_color :: #run hex_color("404040");
 
+// @DEBUG
+global_time_range_min := APOLLO_TIME_INVALID;
+global_time_range_max := APOLLO_TIME_INVALID;
+global_time_current_line := APOLLO_TIME_INVALID;
+
 draw_the_text_pane :: (rect: Rectangle) {
     text_color       := main_text_pane_text_color;
     background_color := main_text_pane_background_color;
@@ -855,6 +842,9 @@ draw_the_text_pane :: (rect: Rectangle) {
         hover_line_index = screen_position_to_line_index(rect, mouse.y);
     }
 
+    first_line := S64_MAX;
+    last_line := -1;
+
     // text
     {
         tail := text_buffer_data;
@@ -865,7 +855,7 @@ draw_the_text_pane :: (rect: Rectangle) {
         pane_width_in_characters := (rect.width - text_x_tweak) / main_font.mono_width;
 
         x := rect.left + text_x_tweak;
-        y := rect.top - h + scroll_rows * main_font.line_height;
+        y := rect.top + (scroll_rows - 1) * h;
         text_y_tweak := -(main_font.typical_descender + main_font.max_descender) / 2.0;
 
         current_ansi_style := Style.{ fg_color = text_color };
@@ -882,6 +872,9 @@ draw_the_text_pane :: (rect: Rectangle) {
             defer y -= h;
             if y > xx rect.top continue;
             if y < xx (rect.top - rect.height - h) continue;
+
+            first_line = min(first_line, line_index);
+            last_line = max(last_line, line_index);
 
             // handle log line info
             info := *text_buffer_line_infos[line_index];
@@ -971,6 +964,62 @@ draw_the_text_pane :: (rect: Rectangle) {
 
     }
 
+    global_time_range_min = APOLLO_TIME_INVALID;
+    global_time_range_max = APOLLO_TIME_INVALID;
+    global_time_current_line = APOLLO_TIME_INVALID;
+
+    // time stamp graph
+    {
+        h := main_font.line_height;
+        y_top := rect.top + (scroll_rows - 0.5) * h;
+
+        time_range_min := APOLLO_TIME_INVALID;
+        time_range_max := APOLLO_TIME_INVALID;
+        for first_line..last_line {
+            info := *text_buffer_line_infos[it];
+            if info.source_id == SOURCE_ID_UNKNOWN continue;
+            if info.time_stamp.year == 0 continue;
+
+            time := calendar_to_apollo(info.time_stamp);
+
+            if it == hover_line_index then global_time_current_line = time;
+
+            if time_range_min == APOLLO_TIME_INVALID then time_range_min = time;
+            time_range_min = min(time_range_min, time);
+            if time_range_max == APOLLO_TIME_INVALID then time_range_max = time;
+            time_range_max = max(time_range_max, time);
+        }
+
+        global_time_range_min = time_range_min;
+        global_time_range_max = time_range_max;
+
+        time_range := to_float64_seconds(time_range_max - time_range_min);
+        x_prev := cast(float) left(rect);
+        y_prev := y_top;
+        seen_time_stamp := false;
+        for line_index: first_line..last_line {
+            y := y_top - line_index * h;
+
+            info := *text_buffer_line_infos[line_index];
+            if info.source_id == SOURCE_ID_UNKNOWN continue;
+            if info.time_stamp.year == 0 continue;
+
+            if !seen_time_stamp { y_prev = y; seen_time_stamp = true; }
+
+            time := calendar_to_apollo(info.time_stamp);
+            time_adjusted := time - time_range_min;
+            adjusted_seconds := to_float64_seconds(time_adjusted);
+            t := adjusted_seconds / time_range;
+
+            if isnan(t) then t = 0.5;
+
+            x := cast(float, left(rect) + width(rect) * t);
+
+            draw_fat_line(.{x_prev, y_prev}, .{x, y}, 2.5, color_cyan);
+
+            x_prev, y_prev = x, y;
+        }
+    }
 }
 
 draw_text_line_with_ansi_escape_codes :: (font_set: My_Dynamic_Font, text: string,
@@ -1378,10 +1427,14 @@ parse_text_buffer_log_line :: (line: string, info: *Log_Line_Info) -> bool {
     source_id := add_source(*text_buffer_all_log_sources, source);
     info.source_id = source_id;
 
+    // skip whitespace
+    while cursor < line.count && inline is_space(line[cursor]) { cursor += 1; }
+
     //
     // parse time stamp
     //
 
+    time_stamp_start := cursor;
     time_stamp, status, tail := parse_date_time_stamp(advance(line, cursor));
     if status != .FULL return false;
     cursor = ifx tail then tail.data - line.data else line.count;
@@ -2977,7 +3030,7 @@ parse_date_time_stamp :: (input: string) -> (Calendar_Time, Parse_Date_Time_Resu
         m1 := input[cursor]; cursor += 1;
         m2 := input[cursor]; cursor += 1;
         if !(inline is_digit(m0)) || !(inline is_digit(m1)) || !(inline is_digit(m2)) return result, status, tail;
-        result.millisecond = xx ((m0 - _0) * 100 + (m1 - _0) * 10 + (m2 - _0));
+        result.millisecond = xx (cast(s16, m0 - _0) * 100 + cast(s16, m1 - _0) * 10 + cast(s16, m2 - _0));
     }
 
     status |= .MILLISECONDS;
