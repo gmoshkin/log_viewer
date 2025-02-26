@@ -646,7 +646,7 @@ update_and_draw_frame :: () -> bool {
             mouse_in_rect := mouse - .{xx scroll_bar_rect.left, xx bottom(scroll_bar_rect)};
             search_match_index := -1;
             if text_search_ui_open
-                do_scroll_bar_anchors(scroll_bar_rect, search_results.matches, search_match_color, .DRAW, mouse_in_rect);
+                search_match_index = do_scroll_bar_anchors(scroll_bar_rect, search_results.matches, search_match_color, .DRAW, mouse_in_rect);
             // explicit anchors have higher priority
             explicit_anchor_index := do_scroll_bar_anchors(scroll_bar_rect, explicit_anchors, anchor_button_active_color, .DRAW, mouse_in_rect, t=15);
             if explicit_anchor_index != -1 {
