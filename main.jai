@@ -5,6 +5,25 @@ EXE_NAME :: "log_viewer";
 TODO:
 
 - log parsing + semantic highlighting
+   - show time graph of logs on screen, something like this:
+    always start at zero and end at windows.x
+     \
+      \
+      |
+      \__
+         \
+          \__
+             \
+              \
+               |
+               |
+               \_
+                 \_
+                   \_
+                     \__
+                        \___
+                            \____
+                                 \
 - preview line at scroll bar anchor hovered over with mouse
 - filterring/hiding? I'm not sure yet what I want/need
 - status bar
@@ -286,7 +305,7 @@ update_and_draw_frame :: () -> bool {
         }
 
         else if it.type == .MOUSE_WHEEL && !modifiers && !draggin_scroll_bar {
-            target_scroll_rows += -3 * it.wheel_delta / cast(float) it.typical_wheel_delta;
+            target_scroll_rows += -6 * it.wheel_delta / cast(float) it.typical_wheel_delta;
             target_scroll_rows = clamp(target_scroll_rows, -text_pane_row_count / 2.0, total_line_count - text_pane_row_count / 2.0);
             request_redraw(tprint("scroll at %", #line));
         }
@@ -881,13 +900,7 @@ draw_the_text_pane :: (rect: Rectangle) {
                         draw_hollow_axis_aligned_rectangle(xx x_start, xx y, xx w, xx main_font.line_height, 2, color_gray);
 
                         if !mouse_event_handled && is_click(.MOUSE_BUTTON_RIGHT) {
-                            menu := open_the_popup_menu(mouse, log_line_popup_menu_callback, info.source_id);
-                            for log_source, source_id: text_buffer_all_log_sources {
-                                // @BROKEN: need to guard against cicles
-                                for merge: merged_log_sources if merge.from == source_id continue log_source;
-                                if source_id == info.source_id continue;
-                                popup_menu_push_item(menu, "Merge with %", log_source, id=source_id);
-                            }
+                            log_source_open_popup_menu(info, mouse);
                         }
                     }
                 }
@@ -1171,6 +1184,24 @@ get_log_source_color :: (source_id: u8) -> Vector4 {
     for merged_log_sources if it.from == source_id return get_log_source_color(it.to);
 
     return log_source_color_scheme[source_id % log_source_color_scheme.count];
+}
+
+log_source_open_popup_menu :: (info: *Log_Line_Info, mouse: Vector2) {
+    menu := open_the_popup_menu(mouse, log_line_popup_menu_callback, info.source_id);
+
+    for log_source, source_id: text_buffer_all_log_sources {
+        // Skip merged... or what the hell was the idea???
+        for merge: merged_log_sources {
+            // @BROKEN: need to guard against cycles
+            if merge.from == source_id continue log_source;
+        }
+
+        // Skip self
+        if source_id == info.source_id continue;
+
+        color := get_log_source_color(xx source_id);
+        popup_menu_push_item(menu, "Merge with %", log_source, id=source_id, icon=.{color, .SQUARE});
+    }
 }
 
 Log_Range :: struct {
@@ -1969,7 +2000,7 @@ Popup_Menu_Item :: struct {
 Icon_Info :: struct {
     // TODO: support images
     color: Vector4;
-    type: enum { NONE; CROSS; }
+    type: enum { NONE; SQUARE; }
 }
 
 popup_menu_border_color :: text_search_ui_border_color;
@@ -2008,9 +2039,9 @@ open_the_popup_menu :: (at: Vector2, callback: Popup_Menu_Callback, callback_dat
     return menu;
 }
 
-popup_menu_push_item :: (menu: *Popup_Menu, format: string, args: .. Any, id := -1) {
+popup_menu_push_item :: (menu: *Popup_Menu, format: string, args: .. Any, id := -1, icon := Icon_Info.{}) {
     text := sprint(format, ..args,, menu.allocator);
-    array_add(*menu.items, Popup_Menu_Item.{text = text, id = id});
+    array_add(*menu.items, Popup_Menu_Item.{text = text, id = id, icon = icon});
 }
 
 popup_menu_handle_click :: (menu: *Popup_Menu) {
@@ -2085,10 +2116,18 @@ do_popup_menu :: (menu: *Popup_Menu, mouse: Vector2, handle_click: bool, $do_dra
             }
         }
 
-        // TODO draw icon
         #if do_draw {
             if hover {
                 draw_axis_aligned_rectangle(xx X, xx y_bottom, xx W, xx h, popup_menu_hovered_item_bg_color);
+            }
+
+            if it.icon.type == .SQUARE {
+                w := 8.0;
+                pad := (h - w) / 2.0;
+                my_x := x + pad;
+                my_y := y_bottom + pad;
+
+                draw_axis_aligned_rectangle(my_x, my_y, w, w, it.icon.color);
             }
 
             Simp.draw_text(font.regular, xx x + text_x_tweak, xx y_bottom + text_y_tweak, it.text, popup_menu_item_text_color);
