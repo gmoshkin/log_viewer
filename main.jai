@@ -4,6 +4,21 @@ EXE_NAME :: "log_viewer";
 
 TODO:
 
+- when drawing text pane do 2 passes
+    - first draw background colors
+    - here can draw the time graph and other middle-ground stuff
+    - second draw foreground
+
+- here's an idea: instead of filterring I could add undo support, basically just
+  store the history of changes and allow switching between them.
+  Could even keep track of the undo tree: go back and branch into a new future.
+  The ui for navigation could be as simple as 2 arrows: back and forward, but
+  if there's a branch there's multiple arrows forward.
+
+- adding text notes to anchors
+
+- serializing the setup, save/restore
+
 - log parsing + semantic highlighting
 - preview line at scroll bar anchor hovered over with mouse
 - filterring/hiding? I'm not sure yet what I want/need
@@ -1246,9 +1261,6 @@ color_black :: #run hex_color("000000");
 color_gray :: #run hex_color("707070");
 
 log_source_color_scheme := Vector4.[
-    color_red,
-    color_green,
-    color_blue,
     color_coral,
     color_yellow,
     color_cyan,
@@ -1256,6 +1268,9 @@ log_source_color_scheme := Vector4.[
     color_orange,
     color_baby_blue,
     color_purple,
+    color_red,
+    color_green,
+    color_blue,
     color_white,
     color_brown,
 ];
@@ -1368,6 +1383,11 @@ process_text_buffer_data :: () {
 
     // Add a dummy range start at the end for convenience
     array_add(*log_ranges_of_source, .{ SOURCE_ID_UNKNOWN, line_index });
+
+    for from: text_buffer_all_log_sources for to: text_buffer_all_log_sources {
+        // TODO: automatically merge based on pid
+        text_buffer_log_sources_to_pid;
+    }
 
     // line_index := 0;
     // while line_index < text_buffer_line_infos.count {
@@ -1941,22 +1961,22 @@ text_search_ui_handle_input_event :: (event: Input.Event) -> handled: bool {
 
         case .ENTER;
             forwards := !event.shift_pressed;
-            // TODO: @ROBUSTNESS this approach sucks, it's better to keep track
-            // of currently selected match and do everything based on it, could
-            // even highlight it some how
-            line_index := cast(int) floor(target_scroll_rows);
+            n_lines_per_screen := height(text_pane_rect) / cast(float) main_font.line_height;
+            jump_destination_row_offset := n_lines_per_screen / 2.0 - 3;
+            current_line_index := cast(int) floor(target_scroll_rows + jump_destination_row_offset);
 
+            // @ROBUSTNESS assuming search_matches are ordered
             matched_line_index := -1;
             if forwards {
                 for search_results.matches {
-                    if it.line_index > line_index {
+                    if it.line_index > current_line_index {
                         matched_line_index = it.line_index;
                         break;
                     }
                 }
             } else {
                 for < search_results.matches {
-                    if it.line_index < line_index {
+                    if it.line_index < current_line_index {
                         matched_line_index = it.line_index;
                         break;
                     }
@@ -1964,7 +1984,7 @@ text_search_ui_handle_input_event :: (event: Input.Event) -> handled: bool {
             }
 
             if matched_line_index >= 0 {
-                target_scroll_rows = xx matched_line_index;
+                target_scroll_rows = matched_line_index - jump_destination_row_offset;
             }
 
             return handled=true;
