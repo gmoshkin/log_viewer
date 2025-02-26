@@ -885,7 +885,8 @@ draw_the_text_pane :: (rect: Rectangle) {
             line_end := ifx line_index < text_buffer_line_infos.count - 1 then text_buffer_line_infos[line_index + 1].line_offset
                                                                           else text_buffer_data.count;
             line_start := info.line_offset;
-            line := slice(text_buffer_data, line_start, line_end - line_start - 1); // -1 to remove '\n'
+            line := slice(text_buffer_data, line_start, line_end - line_start);
+            if line.count > 0 && line[line.count - 1] == #char "\n" then line.count -= 1;
 
             y := y_top - (line_index * h);
 
