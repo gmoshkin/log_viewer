@@ -1126,18 +1126,22 @@ screen_position_to_line_index :: (rect: Rectangle, y: float) -> s64 {
 //
 
 text_buffer_data: string;
+// string owned by `text_buffer_data`
 text_buffer_all_log_sources: [..] string;
+// string owned by `text_buffer_data`
+text_buffer_log_sources_to_pid: Table(string, s32);
 text_buffer_line_infos: [..] Log_Line_Info;
 text_buffer_escape_code_infos: [..] Escape_Code_Info;
 merged_log_sources: [..] struct { from, to: u8; };
 
 Log_Line_Info :: struct {
     line_offset: s64;
+    time_stamp: Calendar_Time;
     source_id: u8 = SOURCE_ID_UNKNOWN;
     source_start: u8;
     escape_codes_start: s16;
     escape_codes_count: s16;
-    // TODO: timestamp
+    pid: s32 = -1;
 }
 
 Escape_Code_Info :: struct {
@@ -1200,7 +1204,8 @@ log_source_open_popup_menu :: (info: *Log_Line_Info, mouse: Vector2) {
         if source_id == info.source_id continue;
 
         color := get_log_source_color(xx source_id);
-        popup_menu_push_item(menu, "Merge with %", log_source, id=source_id, icon=.{color, .SQUARE});
+        pids := table_find_multiple(*text_buffer_log_sources_to_pid, log_source);
+        popup_menu_push_item(menu, "Merge with % (pid: %)", log_source, pids, id=source_id, icon=.{color, .SQUARE});
     }
 }
 
@@ -1248,6 +1253,8 @@ process_text_buffer_data :: () {
     }
 
     array_reset_keeping_memory(*text_buffer_all_log_sources);
+    // keeps memory
+    table_reset(*text_buffer_log_sources_to_pid);
     array_reset_keeping_memory(*merged_log_sources);
     array_reserve(*text_buffer_all_log_sources, SOURCE_ID_UNKNOWN);
     array_reset_keeping_memory(*text_buffer_line_infos);
@@ -1339,9 +1346,15 @@ parse_text_buffer_log_line :: (line: string, info: *Log_Line_Info) -> bool {
     cursor := 0;
 
     // skip whitespace
-    while cursor < line.count && is_space(line[cursor]) { cursor += 1; }
+    while cursor < line.count && inline is_space(line[cursor]) { cursor += 1; }
     if cursor >= line.count return false;
 
+    //
+    // parse source
+    //
+    // example: `default_2_3    |`
+    //           ~~~~~~~~~~~
+    //
     source_start := cursor;
     while cursor < line.count {
         c := line[cursor];
@@ -1353,15 +1366,66 @@ parse_text_buffer_log_line :: (line: string, info: *Log_Line_Info) -> bool {
     source_count := cursor - source_start;
 
     // skip whitespace
-    while cursor < line.count && is_space(line[cursor]) { cursor += 1; }
+    while cursor < line.count && inline is_space(line[cursor]) { cursor += 1; }
+
     if cursor >= line.count return false;
     if line[cursor] != #char "|" return false;
+    cursor += 1;
 
     source := slice(line, source_start, source_count);
     info.source_start = xx source_start;
 
     source_id := add_source(*text_buffer_all_log_sources, source);
     info.source_id = source_id;
+
+    //
+    // parse time stamp
+    //
+
+    time_stamp, status, tail := parse_date_time_stamp(advance(line, cursor));
+    if status != .FULL return false;
+    cursor = ifx tail then tail.data - line.data else line.count;
+
+    info.time_stamp = time_stamp;
+
+    //
+    // parse pid
+    //
+
+    // skip whitespace
+    while cursor < line.count && inline is_space(line[cursor]) { cursor += 1; }
+
+    // `[`
+    if line.count - cursor < 1 return false;
+    lb := line[cursor]; cursor += 1;
+    if lb != #char "[" return false;
+
+    // pid
+    pid_start := cursor;
+    pid: s32;
+    while cursor < line.count {
+        d := line[cursor];
+        if !inline is_digit(d) break;
+        cursor += 1;
+        pid = pid * 10 + (d - #char "0");
+    }
+    if cursor == pid_start return false;
+
+    // `]`
+    if line.count - cursor < 1 return false;
+    rb := line[cursor]; cursor += 1;
+    if rb != #char "]" return false;
+
+    info.pid = pid;
+    already_seen := false;
+    for table_find_multiple(*text_buffer_log_sources_to_pid, source) {
+        if it == pid {
+            already_seen = true;
+            break;
+        }
+    }
+    if !already_seen
+        table_add(*text_buffer_log_sources_to_pid, source, pid);
 
     return true;
 }
@@ -2772,6 +2836,250 @@ print_ascii_or_hex :: (builder: *String_Builder, s: string) {
 // miscellaneous
 //
 
+Parse_Date_Time_Result :: enum_flags {
+    DATE; TIME; MILLISECONDS;
+    FULL :: DATE | TIME | MILLISECONDS;
+}
+parse_date_time_stamp :: (input: string) -> (Calendar_Time, Parse_Date_Time_Result, tail: string) {
+    _0 :: #char "0";
+
+    result: Calendar_Time;
+    // Won't be able to parse this
+    result.day_of_week_starting_at_0 = -1;
+    tail := input;
+
+    status: Parse_Date_Time_Result;
+    // Calendar_Time :: struct {
+    //     year:        s32;
+    //     month_starting_at_0: s8;         // 0-11. Use as an index to a month name array, or add 1 to get the normal human-readable number.
+    //     day_of_month_starting_at_0: s8;  // 0-30. Add 1 to get the normal human-readable number.
+    //     day_of_week_starting_at_0: s8;   // Sunday, Monday, Tuesday, Wednesday, Thursday, Friday, Saturday.
+    //     hour:        s8;
+    //     minute:      s8;
+    //     second:      s8;
+    //     millisecond: s16;
+    //     time_zone: Time_Zone;
+    // }
+
+    cursor := 0;
+
+    // skip whitespace
+    while cursor < input.count && inline is_space(input[cursor]) { cursor += 1; }
+    tail = advance(input, cursor);
+    if cursor >= input.count return result, status, tail;
+
+    //
+    // parse date `YYYY.MM.DD` (any separator)
+    //
+    if input.count - cursor < 10 return result, status, tail;
+
+    // year
+    {
+        y0 := input[cursor]; cursor += 1;
+        y1 := input[cursor]; cursor += 1;
+        y2 := input[cursor]; cursor += 1;
+        y3 := input[cursor]; cursor += 1;
+        if !(inline is_digit(y0)) || !(inline is_digit(y1)) || !(inline is_digit(y2)) || !(inline is_digit(y3)) {
+            return result, status, tail;
+        }
+        result.year = xx (cast(s32, y0 - _0) * 1000 + cast(s32, y1 - _0) * 100 + cast(s32, y2 - _0) * 10 + cast(s32, y3 - _0));
+    }
+
+    // separator
+    sep := input[cursor]; cursor += 1;
+    if (inline is_digit(sep)) || (inline is_alpha(sep)) return result, status, tail;
+
+    // month
+    {
+        m0 := xx input[cursor]; cursor += 1;
+        m1 := xx input[cursor]; cursor += 1;
+        if !(inline is_digit(m0)) || !(inline is_digit(m1)) return result, status, tail;
+        result.month_starting_at_0 = xx ((m0 - _0) * 10 + (m1 - _0) - 1);
+    }
+
+    // separator
+    sep = input[cursor]; cursor += 1;
+    if (inline is_digit(sep)) || (inline is_alpha(sep)) return result, status, tail;
+
+    // day
+    {
+        d0 := xx input[cursor]; cursor += 1;
+        d1 := xx input[cursor]; cursor += 1;
+        if !(inline is_digit(d0)) || !(inline is_digit(d1)) return result, status, tail;
+        result.day_of_month_starting_at_0 = xx ((d0 - _0) * 10 + (d1 - _0) - 1);
+    }
+
+    status = .DATE;
+    tail = advance(input, cursor);
+    if cursor >= input.count return result, status, tail;
+
+    // separator
+    sep = input[cursor]; cursor += 1;
+    if (inline is_digit(sep)) || (inline is_alpha(sep)) return result, status, tail;
+
+    // skip whitespace
+    while cursor < input.count && inline is_space(input[cursor]) { cursor += 1; }
+    tail = advance(input, cursor);
+    if cursor >= input.count return result, status, tail;
+
+    //
+    // parse time `HH:MM:SS` (any separator)
+    //
+    if input.count - cursor < 8 return result, status, tail;
+
+    // hour
+    {
+        h0 := xx input[cursor]; cursor += 1;
+        h1 := xx input[cursor]; cursor += 1;
+        if !(inline is_digit(h0)) || !(inline is_digit(h1)) return result, status, tail;
+        result.hour = xx ((h0 - _0) * 10 + (h1 - _0));
+    }
+
+    // separator
+    sep = input[cursor]; cursor += 1;
+    if (inline is_digit(sep)) || (inline is_alpha(sep)) return result, status, tail;
+
+    // minute
+    {
+        m0 := input[cursor]; cursor += 1;
+        m1 := input[cursor]; cursor += 1;
+        if !(inline is_digit(m0)) || !(inline is_digit(m1)) return result, status, tail;
+        result.minute = xx ((m0 - _0) * 10 + (m1 - _0));
+    }
+
+    // separator
+    sep = input[cursor]; cursor += 1;
+    if (inline is_digit(sep)) || (inline is_alpha(sep)) return result, status, tail;
+
+    // second
+    {
+        s0 := input[cursor]; cursor += 1;
+        s1 := input[cursor]; cursor += 1;
+        if !(inline is_digit(s0)) || !(inline is_digit(s1)) return result, status, tail;
+        result.second = xx ((s0 - _0) * 10 + (s1 - _0));
+    }
+
+    status |= .TIME;
+    tail = advance(input, cursor);
+
+    //
+    // parse millisecond `.MMM` (any separator)
+    //
+    if input.count - cursor < 4 return result, status, tail;
+
+    // separator
+    sep = input[cursor]; cursor += 1;
+    if (inline is_digit(sep)) || (inline is_alpha(sep)) return result, status, tail;
+
+    // millisecond
+    {
+        m0 := input[cursor]; cursor += 1;
+        m1 := input[cursor]; cursor += 1;
+        m2 := input[cursor]; cursor += 1;
+        if !(inline is_digit(m0)) || !(inline is_digit(m1)) || !(inline is_digit(m2)) return result, status, tail;
+        result.millisecond = xx ((m0 - _0) * 100 + (m1 - _0) * 10 + (m2 - _0));
+    }
+
+    status |= .MILLISECONDS;
+    tail = advance(input, cursor);
+
+    return result, status, tail;
+}
+
+test_parse_date_time_stamp :: () {
+    line: string;
+
+    {
+        line = "2025:02:26 17:05:33.047 tail";
+        date_time, status, tail := parse_date_time_stamp(line);
+        assert(status == .FULL);
+        assert(date_time.year == 2025);
+        assert(date_time.month_starting_at_0 == 1);
+        assert(date_time.day_of_month_starting_at_0 == 25);
+        assert(date_time.day_of_week_starting_at_0 == -1);
+        assert(date_time.hour == 17);
+        assert(date_time.minute == 5);
+        assert(date_time.second == 33);
+        assert(date_time.millisecond == 47);
+        assert(tail == " tail");
+    }
+
+    {
+        line = "  2003:03:13 no time?";
+        date_time, status, tail := parse_date_time_stamp(line);
+        assert(status == .DATE);
+        assert(date_time.year == 2003);
+        assert(date_time.month_starting_at_0 == 2);
+        assert(date_time.day_of_month_starting_at_0 == 12);
+        assert(date_time.day_of_week_starting_at_0 == -1);
+        assert(date_time.hour == 0);
+        assert(date_time.minute == 0);
+        assert(date_time.second == 0);
+        assert(date_time.millisecond == 0);
+        assert(tail == "no time?");
+    }
+
+    {
+        line = "1993:05:19 12:30:00 not accurate enough!";
+        date_time, status, tail := parse_date_time_stamp(line);
+        assert(status == .DATE | .TIME);
+        assert(date_time.year == 1993);
+        assert(date_time.month_starting_at_0 == 4);
+        assert(date_time.day_of_month_starting_at_0 == 18);
+        assert(date_time.day_of_week_starting_at_0 == -1);
+        assert(date_time.hour == 12);
+        assert(date_time.minute == 30);
+        assert(date_time.second == 0);
+        assert(date_time.millisecond == 0);
+        assert(tail == " not accurate enough!");
+    }
+
+    {
+        line = "  garbage!";
+        date_time, status, tail := parse_date_time_stamp(line);
+        assert(status == 0);
+        assert(date_time.year == 0);
+        assert(date_time.month_starting_at_0 == 0);
+        assert(date_time.day_of_month_starting_at_0 == 0);
+        assert(date_time.day_of_week_starting_at_0 == -1);
+        assert(date_time.hour == 0);
+        assert(date_time.minute == 0);
+        assert(date_time.second == 0);
+        assert(date_time.millisecond == 0);
+        assert(tail == "garbage!");
+    }
+
+    {
+        line = "";
+        date_time, status, tail := parse_date_time_stamp(line);
+        assert(status == 0);
+        assert(date_time.year == 0);
+        assert(date_time.month_starting_at_0 == 0);
+        assert(date_time.day_of_month_starting_at_0 == 0);
+        assert(date_time.day_of_week_starting_at_0 == -1);
+        assert(date_time.hour == 0);
+        assert(date_time.minute == 0);
+        assert(date_time.second == 0);
+        assert(date_time.millisecond == 0);
+        assert(tail == "");
+    }
+
+    {
+        line = "   \t  \n  \r ";
+        date_time, status, tail := parse_date_time_stamp(line);
+        assert(status == 0);
+        assert(date_time.year == 0);
+        assert(date_time.month_starting_at_0 == 0);
+        assert(date_time.day_of_month_starting_at_0 == 0);
+        assert(date_time.day_of_week_starting_at_0 == -1);
+        assert(date_time.hour == 0);
+        assert(date_time.minute == 0);
+        assert(date_time.second == 0);
+        assert(date_time.millisecond == 0);
+        assert(tail == "");
+    }
+}
+
 hex_color :: ($hex: string, $loc := #caller_location) -> Vector4 #expand {
     return #run -> Vector4 {
         result, ok := parse_hex_color(hex);
@@ -3126,9 +3434,12 @@ pretty_assert :: (code: Code, loc := #caller_location) #expand {
 //
 
 run_tests :: () {
+    log("running tests...");
     test_search_for_match();
     test_array_insert_at();
     test_quick_sort();
+    test_parse_date_time_stamp();
+    log("\e[32mtests passed!\e[0m");
 }
 
 WANTED_MSAA :: 8;
