@@ -252,12 +252,18 @@ update_and_draw_frame :: () -> bool {
         }
 
         else if it.key_code == .MOUSE_BUTTON_LEFT && it.key_pressed {
-            request_redraw("mouse click");
+            request_redraw("mouse left click");
             mouse_at_click = mouse;
 
             // if text_search_ui_active && !axis_aligned_rectangle_contains(text_search_ui_rect, mouse) {
             //     text_search_ui_active = false;
             // }
+        } else if it.key_code == .MOUSE_BUTTON_RIGHT && it.key_pressed {
+            request_redraw("mouse right click");
+            mouse_at_click = mouse;
+        } else if it.key_code == .MOUSE_BUTTON_MIDDLE && it.key_pressed {
+            request_redraw("mouse middle click");
+            mouse_at_click = mouse;
         }
 
         // modules/Input doesn't set it.ctrl_pressed for MOUSE_WHEEL :(
@@ -472,6 +478,16 @@ update_and_draw_frame :: () -> bool {
         profile_t0 = seconds_since_init();
         draw_the_text_pane(text_pane_rect);
         Profile();
+
+        // draw the side bars to fix the ugly text bleed over
+        left_rect := window_rect;
+        left_rect.width = left(text_pane_rect);
+        draw_axis_aligned_rectangle(left_rect, window_bg_color);
+
+        right_rect := window_rect;
+        right_rect.left = right(text_pane_rect);
+        right_rect.width -= right_rect.left;
+        draw_axis_aligned_rectangle(right_rect, window_bg_color);
     }
 
     //
@@ -628,7 +644,9 @@ update_and_draw_frame :: () -> bool {
         // draw scroll bar anchors
         {
             mouse_in_rect := mouse - .{xx scroll_bar_rect.left, xx bottom(scroll_bar_rect)};
-            search_match_index := do_scroll_bar_anchors(scroll_bar_rect, search_results.matches, search_match_color, .DRAW, mouse_in_rect);
+            search_match_index := -1;
+            if text_search_ui_open
+                do_scroll_bar_anchors(scroll_bar_rect, search_results.matches, search_match_color, .DRAW, mouse_in_rect);
             // explicit anchors have higher priority
             explicit_anchor_index := do_scroll_bar_anchors(scroll_bar_rect, explicit_anchors, anchor_button_active_color, .DRAW, mouse_in_rect, t=15);
             if explicit_anchor_index != -1 {
@@ -851,7 +869,30 @@ draw_the_text_pane :: (rect: Rectangle) {
             color := text_color;
             if info.source_id != SOURCE_ID_UNKNOWN {
                 color = get_log_source_color(info.source_id);
+
+                source := text_buffer_all_log_sources[info.source_id];
+                if line_index == hover_line_index && (xx (info.source_start + source.count) > scroll_columns) {
+                    x_start := x + (info.source_start - scroll_columns) * main_font.mono_width;
+                    x_end := min(x_start + source.count * main_font.mono_width, xx right(rect));
+                    x_start = max(x_start, xx left(rect));
+
+                    if mouse.x >= x_start && mouse.x <= x_end {
+                        w := x_end - x_start;
+                        draw_hollow_axis_aligned_rectangle(xx x_start, xx y, xx w, xx main_font.line_height, 2, color_gray);
+
+                        if !mouse_event_handled && is_click(.MOUSE_BUTTON_RIGHT) {
+                            menu := open_the_popup_menu(mouse, log_line_popup_menu_callback, info.source_id);
+                            for log_source, source_id: text_buffer_all_log_sources {
+                                // @BROKEN: need to guard against cicles
+                                for merge: merged_log_sources if merge.from == source_id continue log_source;
+                                if source_id == info.source_id continue;
+                                popup_menu_push_item(menu, "Merge with %", log_source, id=source_id);
+                            }
+                        }
+                    }
+                }
             }
+
 
             // handle anchor segment
             inside_anchor_segment := (line_index >= anchor_segment_first) && (line_index <= anchor_segment_last);
@@ -883,7 +924,8 @@ draw_the_text_pane :: (rect: Rectangle) {
                                                           x, -x_tweak, y, text_y_tweak, color, codes, *current_ansi_style, override_ansi_style);
                 } else {
                     line = advance(line, n_columns_to_skip);
-                    line.count = min(line.count, xx pane_width_in_characters);
+                    // I'm sleepy and this doesn't work ToT
+                    line.count = min(line.count, xx pane_width_in_characters + 1);
 
                     // TODO: tabs handling (I fucking hate tabs!!!!)
                     w_text := Simp.prepare_text(font, line);
@@ -1074,6 +1116,7 @@ text_buffer_data: string;
 text_buffer_all_log_sources: [..] string;
 text_buffer_line_infos: [..] Log_Line_Info;
 text_buffer_escape_code_infos: [..] Escape_Code_Info;
+merged_log_sources: [..] struct { from, to: u8; };
 
 Log_Line_Info :: struct {
     line_offset: s64;
@@ -1122,8 +1165,11 @@ log_source_color_scheme := Vector4.[
     color_brown,
 ];
 
-get_log_source_color :: (source_id: u8) -> Vector4 #expand {
+get_log_source_color :: (source_id: u8) -> Vector4 {
     if source_id == SOURCE_ID_UNKNOWN return main_text_pane_text_color;
+
+    for merged_log_sources if it.from == source_id return get_log_source_color(it.to);
+
     return log_source_color_scheme[source_id % log_source_color_scheme.count];
 }
 
@@ -1171,6 +1217,7 @@ process_text_buffer_data :: () {
     }
 
     array_reset_keeping_memory(*text_buffer_all_log_sources);
+    array_reset_keeping_memory(*merged_log_sources);
     array_reserve(*text_buffer_all_log_sources, SOURCE_ID_UNKNOWN);
     array_reset_keeping_memory(*text_buffer_line_infos);
     array_reset_keeping_memory(*log_ranges_of_source);
@@ -1216,9 +1263,9 @@ process_text_buffer_data :: () {
     log("max line length: %", max_line_length);
     log("escape code count: % (% unique)", text_buffer_escape_code_infos.count, escape_code_stats.count);
 
-    for escape_code_stats {
-        log("'%': %, seen % times", cast(Ascii_Or_Hex) it_index, parse_escape_sequence(it_index), it);
-    }
+    // for escape_code_stats {
+    //     log("'%': %, seen % times", cast(Ascii_Or_Hex) it_index, parse_escape_sequence(it_index), it);
+    // }
 
     if search_results.matches {
         update_text_buffer_search_results(search_results.search_string);
@@ -1297,6 +1344,17 @@ add_source :: (sources: *[..] string, source: string) -> u8 {
 
     array_add(sources, source);
     return xx (sources.count - 1);
+}
+
+log_line_popup_menu_callback :: (menu: *Popup_Menu, event: Popup_Menu_Event) {
+    assert(menu.callback_data.type == type_info(u8));
+    this_source_id := cast(*u8, menu.callback_data.value_pointer).*;
+
+    if event == .CLICK {
+        id := menu.items[menu.hovered_item].id;
+        array_add(*merged_log_sources, .{to=xx this_source_id, from=xx id});
+        log("merged sources % and %", this_source_id, id);
+    }
 }
 
 //
