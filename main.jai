@@ -1225,7 +1225,9 @@ text_buffer_all_log_sources: [..] string;
 text_buffer_log_sources_to_pid: Table(string, s32);
 text_buffer_line_infos: [..] Log_Line_Info;
 text_buffer_escape_code_infos: [..] Escape_Code_Info;
-merged_log_sources: [..] struct { from, to: u8; };
+merged_log_sources: [..] Merge_Info;
+
+Merge_Info :: struct { from, to: u8; }
 
 Log_Line_Info :: struct {
     line_offset: s64;
@@ -1287,14 +1289,10 @@ log_source_open_popup_menu :: (info: *Log_Line_Info, mouse: Vector2) {
     menu := open_the_popup_menu(mouse, log_line_popup_menu_callback, info.source_id);
 
     for log_source, source_id: text_buffer_all_log_sources {
-        // Skip merged... or what the hell was the idea???
-        for merge: merged_log_sources {
-            // @BROKEN: need to guard against cycles
-            if merge.from == source_id continue log_source;
-        }
-
         // Skip self
         if source_id == info.source_id continue;
+
+        if !ok_to_merge(merged_log_sources, from=xx source_id, to=info.source_id) continue;
 
         color := get_log_source_color(xx source_id);
         pids := table_find_multiple(*text_buffer_log_sources_to_pid, log_source);
@@ -1384,9 +1382,16 @@ process_text_buffer_data :: () {
     // Add a dummy range start at the end for convenience
     array_add(*log_ranges_of_source, .{ SOURCE_ID_UNKNOWN, line_index });
 
-    for from: text_buffer_all_log_sources for to: text_buffer_all_log_sources {
-        // TODO: automatically merge based on pid
-        text_buffer_log_sources_to_pid;
+    for to, to_id: text_buffer_all_log_sources for from, from_id: text_buffer_all_log_sources {
+        if to_id == from_id continue;
+        to_pids := table_find_multiple(*text_buffer_log_sources_to_pid, to);
+        from_pids := table_find_multiple(*text_buffer_log_sources_to_pid, from);
+        for from_pid: from_pids for to_pid: to_pids {
+            if from_pid != to_pid continue;
+            if !ok_to_merge(merged_log_sources, from=xx from_id, to=xx to_id) continue;
+            array_add(*merged_log_sources, .{to=xx to_id, from=xx from_id});
+            continue from;
+        }
     }
 
     // line_index := 0;
@@ -1471,10 +1476,6 @@ parse_text_buffer_log_line :: (line: string, info: *Log_Line_Info) -> bool {
     cursor += 1;
 
     source := slice(line, source_start, source_count);
-    info.source_start = xx source_start;
-
-    source_id := add_source(*text_buffer_all_log_sources, source);
-    info.source_id = source_id;
 
     // skip whitespace
     while cursor < line.count && inline is_space(line[cursor]) { cursor += 1; }
@@ -1485,7 +1486,27 @@ parse_text_buffer_log_line :: (line: string, info: *Log_Line_Info) -> bool {
 
     time_stamp_start := cursor;
     time_stamp, status, tail := parse_date_time_stamp(advance(line, cursor));
-    if status != .FULL return false;
+    if status != .FULL {
+        source_is_not_number := false;
+        for source if !inline is_digit(it) { source_is_not_number = true; break; }
+
+        // @HACK I want to ingore lines like ` 123 |  let compilation = error;`
+        // but keep lines which come from audit (why do I even bother?)
+        if source_is_not_number {
+            source_id := add_source(*text_buffer_all_log_sources, source);
+            info.source_start = xx source_start;
+            info.source_id = source_id;
+        }
+
+        // TODO: parse the json log format
+
+        return false;
+    }
+
+    source_id := add_source(*text_buffer_all_log_sources, source);
+    info.source_start = xx source_start;
+    info.source_id = source_id;
+
     cursor = ifx tail then tail.data - line.data else line.count;
 
     info.time_stamp = time_stamp;
@@ -1532,7 +1553,7 @@ parse_text_buffer_log_line :: (line: string, info: *Log_Line_Info) -> bool {
     return true;
 }
 
-add_source :: (sources: *[..] string, source: string) -> u8 {
+add_source :: (sources: *[..] string, source: string) -> source_id: u8 {
     for sources.* {
         if it == source return xx it_index;
     }
@@ -1542,6 +1563,26 @@ add_source :: (sources: *[..] string, source: string) -> u8 {
     array_add(sources, source);
     return xx (sources.count - 1);
 }
+
+ok_to_merge :: (merges: [] Merge_Info, from: u8, to: u8) -> ok: bool {
+    // Merging these 2 would lead to an infinite loop
+    if detect_cycle(merged_log_sources, from=from, to=to) return false;
+
+    // Skip ones that are already merged somewhere, don't merge them to anything else
+    for merge: merged_log_sources if merge.from == from return false;
+
+    return true;
+}
+
+detect_cycle :: (merges: [] Merge_Info, from: u8, to: u8) -> found_cycle: bool {
+    for merges {
+        if it.to != from continue;
+        if it.from == to return true;
+        if detect_cycle(merges, it.from, to) return true;
+    }
+    return false;
+}
+
 
 log_line_popup_menu_callback :: (menu: *Popup_Menu, event: Popup_Menu_Event) {
     assert(menu.callback_data.type == type_info(u8));
@@ -2221,6 +2262,12 @@ popup_menu_handle_click :: (menu: *Popup_Menu) {
 }
 
 do_popup_menu :: (menu: *Popup_Menu, mouse: Vector2, handle_click: bool, $do_draw := false) -> input_handled: bool {
+    if !menu.items {
+        // Somebody opened an empty menu, just close it immediately
+        menu.flags &= ~(.OPEN | .HAS_MOUSE_FOCUS);
+        return false;
+    }
+
     font := ui_font;
     assert(menu.flags & .OPEN != 0);
 
