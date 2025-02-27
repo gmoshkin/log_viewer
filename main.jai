@@ -675,7 +675,8 @@ update_and_draw_frame :: () -> bool {
         }
 
         if text_search_ui_open {
-            draw_text_search_ui(text_search_ui_rect, main_font);
+            handled := draw_text_search_ui(text_search_ui_rect, main_font, handle_click=!mouse_event_handled);
+            mouse_event_handled ||= handled;
         }
     }
 
@@ -1296,7 +1297,7 @@ log_source_open_popup_menu :: (info: *Log_Line_Info, mouse: Vector2) {
 
         color := get_log_source_color(xx source_id);
         pids := table_find_multiple(*text_buffer_log_sources_to_pid, log_source);
-        popup_menu_push_item(menu, "Merge with % (pid: %)", log_source, pids, id=source_id, icon=.{color, .SQUARE});
+        popup_menu_push_item(menu, "Merge with % (pid: %)", log_source, pids, id=source_id, icon=.{color, 8.0, .SQUARE});
     }
 }
 
@@ -2002,31 +2003,7 @@ text_search_ui_handle_input_event :: (event: Input.Event) -> handled: bool {
 
         case .ENTER;
             forwards := !event.shift_pressed;
-            n_lines_per_screen := height(text_pane_rect) / cast(float) main_font.line_height;
-            jump_destination_row_offset := n_lines_per_screen / 2.0 - 3;
-            current_line_index := cast(int) floor(target_scroll_rows + jump_destination_row_offset);
-
-            // @ROBUSTNESS assuming search_matches are ordered
-            matched_line_index := -1;
-            if forwards {
-                for search_results.matches {
-                    if it.line_index > current_line_index {
-                        matched_line_index = it.line_index;
-                        break;
-                    }
-                }
-            } else {
-                for < search_results.matches {
-                    if it.line_index < current_line_index {
-                        matched_line_index = it.line_index;
-                        break;
-                    }
-                }
-            }
-
-            if matched_line_index >= 0 {
-                target_scroll_rows = matched_line_index - jump_destination_row_offset;
-            }
+            jump_to_next_search_match(forwards);
 
             return handled=true;
     }
@@ -2034,7 +2011,35 @@ text_search_ui_handle_input_event :: (event: Input.Event) -> handled: bool {
     return handled=false;
 }
 
-draw_text_search_ui :: (rect: Rectangle, font: My_Dynamic_Font) {
+jump_to_next_search_match :: (forwards: bool) {
+    n_lines_per_screen := height(text_pane_rect) / cast(float) main_font.line_height;
+    jump_destination_row_offset := n_lines_per_screen / 2.0 - 3;
+    current_line_index := cast(int) floor(target_scroll_rows + jump_destination_row_offset);
+
+    // @ROBUSTNESS assuming search_matches are ordered
+    matched_line_index := -1;
+    if forwards {
+        for search_results.matches {
+            if it.line_index > current_line_index {
+                matched_line_index = it.line_index;
+                break;
+            }
+        }
+    } else {
+        for < search_results.matches {
+            if it.line_index < current_line_index {
+                matched_line_index = it.line_index;
+                break;
+            }
+        }
+    }
+
+    if matched_line_index >= 0 {
+        target_scroll_rows = matched_line_index - jump_destination_row_offset;
+    }
+}
+
+draw_text_search_ui :: (rect: Rectangle, font: My_Dynamic_Font, handle_click: bool) -> click_handled: bool {
     draw_axis_aligned_rectangle(rect, text_search_ui_background_color);
     draw_hollow_axis_aligned_rectangle(xx rect.left, xx bottom(rect), xx rect.width, xx rect.height,
                                        border = text_search_ui_border_width, text_search_ui_border_color);
@@ -2057,6 +2062,35 @@ draw_text_search_ui :: (rect: Rectangle, font: My_Dynamic_Font) {
 
         draw_axis_aligned_rectangle(x, y, xx w, xx h, text_search_ui_cursor_color);
     }
+
+    click_handled := false;
+
+    // do buttons
+    if search_results.matches {
+        fg_color := text_search_ui_text_color;
+        bg_color := text_search_ui_background_color;
+
+        size := cast(float) height(rect);
+        pad := border_width;
+
+        x := right(rect) + pad;
+        y := cast(float) bottom(rect);
+
+        click := do_simple_button(x, y, size, size, border_width, Icon_Info.{fg_color, size * .6, .TRIANGLE_LEFT}, bg_color, handle_click);
+        if click {
+            jump_to_next_search_match(forwards=false);
+            click_handled = true;
+        }
+
+        x += size + pad;
+        click = do_simple_button(x, y, size, size, border_width, Icon_Info.{fg_color, size * .6, .TRIANGLE_RIGHT}, bg_color, handle_click);
+        if click {
+            jump_to_next_search_match(forwards=true);
+            click_handled = true;
+        }
+    }
+
+    return click_handled;
 }
 
 //
@@ -2207,7 +2241,15 @@ Popup_Menu_Item :: struct {
 Icon_Info :: struct {
     // TODO: support images
     color: Vector4;
-    type: enum { NONE; SQUARE; }
+    size: float;
+    type: enum {
+        NONE;
+        SQUARE;
+        TRIANGLE_LEFT;
+        TRIANGLE_RIGHT;
+        TRIANGLE_UP;
+        TRIANGLE_DOWN;
+    }
 }
 
 popup_menu_border_color :: text_search_ui_border_color;
@@ -2334,14 +2376,7 @@ do_popup_menu :: (menu: *Popup_Menu, mouse: Vector2, handle_click: bool, $do_dra
                 draw_axis_aligned_rectangle(xx X, xx y_bottom, xx W, xx h, popup_menu_hovered_item_bg_color);
             }
 
-            if it.icon.type == .SQUARE {
-                w := 8.0;
-                pad := (h - w) / 2.0;
-                my_x := x + pad;
-                my_y := y_bottom + pad;
-
-                draw_axis_aligned_rectangle(my_x, my_y, w, w, it.icon.color);
-            }
+            draw_icon(x + h / 2.0, y_bottom + h / 2.0, it.icon);
 
             Simp.draw_text(font.regular, xx x + text_x_tweak, xx y_bottom + text_y_tweak, it.text, popup_menu_item_text_color);
         }
@@ -2385,6 +2420,70 @@ draw_simple_text_pane :: (parent_rect: Rectangle, font: *Simp.Dynamic_Font, left
         y -= h;
         found:, line:, tail = split_from_left(tail, #char "\n");
         Simp.draw_text(font, xx x, xx y + text_y_tweak, line, text_color);
+    }
+}
+
+do_simple_button :: (x: float, y: float, w: float, h: float, border: float, icon: Icon_Info, bg_color: Vector4, handle_click: bool) -> handled_click: bool {
+    pad := border;
+
+    fg_color_ := icon.color;
+    bg_color_ := bg_color;
+
+    click_handled := false;
+
+    if handle_click && axis_aligned_rectangle_contains(x, y, w, h, mouse) {
+        Swap(*fg_color_, *bg_color_);
+
+        if is_click(.MOUSE_BUTTON_LEFT) {
+            click_handled = true;
+        }
+    }
+
+    draw_axis_aligned_rectangle(x, y, w, h, bg_color_);
+    draw_hollow_axis_aligned_rectangle(x, y, w, h, border, text_search_ui_border_color);
+
+    icon_ := icon;
+    icon_.color = fg_color_;
+    draw_icon(x + w / 2.0, y + h / 2.0, icon_);
+
+    return click_handled;
+}
+
+draw_icon :: (x: float, y: float, icon: Icon_Info) {
+    middle := Vector2.{x, y};
+    if #complete icon.type == {
+        case .NONE; return;
+        case .SQUARE;
+            w := icon.size;
+            draw_axis_aligned_rectangle(x - w / 2.0, y - w / 2.0, w, w, icon.color);
+        case .TRIANGLE_LEFT;
+            size := icon.size;
+            p0 := middle + .{-size * .4,          0};
+            p1 := middle + .{ size * .4,  size * .5};
+            p2 := middle + .{ size * .4, -size * .5};
+            draw_triangle(p0, p1, p2, icon.color);
+
+        case .TRIANGLE_RIGHT;
+            size := icon.size;
+            p0 := middle + .{ size * .4,          0};
+            p1 := middle + .{-size * .4,  size * .5};
+            p2 := middle + .{-size * .4, -size * .5};
+            draw_triangle(p0, p1, p2, icon.color);
+
+        case .TRIANGLE_UP;
+            size := icon.size;
+            p0 := middle + .{         0,  size * .4};
+            p1 := middle + .{ size * .5, -size * .4};
+            p2 := middle + .{-size * .5, -size * .4};
+            draw_triangle(p0, p1, p2, icon.color);
+
+        case .TRIANGLE_DOWN;
+            size := icon.size;
+            p0 := middle + .{         0, -size * .4};
+            p1 := middle + .{ size * .5,  size * .4};
+            p2 := middle + .{-size * .5,  size * .4};
+            draw_triangle(p0, p1, p2, icon.color);
+
     }
 }
 
