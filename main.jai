@@ -1868,8 +1868,9 @@ text_search_ui_cursor_color :: #run hex_color("ffffff");
 text_search_ui_text_color :: #run hex_color("ffffff");
 text_search_ui_border_width :: 3.0;
 
-text_input_cursor: s64;
-text_input_buffer: [..] u8;
+text_search_input := Text_Input_State.{
+    max_length = MAX_SEARCH_STRING_LENGTH,
+};
 
 open_text_search_ui :: () {
     text_search_ui_open = true;
@@ -1880,135 +1881,25 @@ close_text_search_ui :: () {
 }
 
 text_search_ui_handle_input_event :: (event: Input.Event) -> handled: bool {
-    if !event.key_pressed return handled=false;
+    status := text_input_handle_event(*text_search_input, event);
+    if !status return false;
 
-    if !event.ctrl_pressed && event.key_code >= #char " " && event.key_code <= #char "~" {
-        if event.alt_pressed return handled=false;
-
-        char := cast(u8) event.key_code;
-        if event.shift_pressed {
-            if char == {
-                case #char "`";  char = #char "~";
-                case #char "1";  char = #char "!";
-                case #char "2";  char = #char "@";
-                case #char "3";  char = #char "#";
-                case #char "4";  char = #char "$";
-                case #char "5";  char = #char "%";
-                case #char "6";  char = #char "^";
-                case #char "7";  char = #char "&";
-                case #char "8";  char = #char "*";
-                case #char "9";  char = #char "(";
-                case #char "0";  char = #char ")";
-                case #char "-";  char = #char "_";
-                case #char "[";  char = #char "{";
-                case #char "]";  char = #char "}";
-                case #char "\\"; char = #char "|";
-                case #char ";";  char = #char ":";
-                case #char "'";  char = #char "\"";
-                case #char ",";  char = #char "<";
-                case #char ".";  char = #char ">";
-                case #char "/";  char = #char "?";
-            }
-        } else {
-            if char >= #char "A" && char <= #char "Z" {
-                char += #char "a" - #char "A";
-            } else if char == {
-                // WTF is this???
-                case #char "+"; char = #char "=";
-            }
-        }
-
-        if text_input_buffer.count + 1 > MAX_SEARCH_STRING_LENGTH {
-            // TODO: error reporting
-            log_error("search string truncated to % (wanted to add %)", MAX_SEARCH_STRING_LENGTH, 1);
-            return handled=true;
-        }
-
-        array_insert_at(*text_input_buffer, char, text_input_cursor);
-        text_input_cursor += 1;
-
-        update_text_buffer_search_results(xx text_input_buffer);
-
-        request_redraw(tprint("text search at %", #line));
-        return handled=true;
-
-    } else if event.key_code == {
-        case .ESCAPE;
-            close_text_search_ui();
-            request_redraw(tprint("text search at %", #line));
-            return handled=true;
-
-        case .BACKSPACE;
-            if text_input_cursor > 0 {
-                array_ordered_remove_range(*text_input_buffer, text_input_cursor - 1, text_input_cursor);
-                text_input_cursor -= 1;
-                request_redraw(tprint("text search at %", #line));
-
-                update_text_buffer_search_results(xx text_input_buffer);
-            }
-            return handled=true;
-
-        case .DELETE;
-            if text_input_buffer.count > 0 && text_input_cursor < text_input_buffer.count {
-                array_ordered_remove_range(*text_input_buffer, text_input_cursor, text_input_cursor + 1);
-                request_redraw(tprint("text search at %", #line));
-
-                update_text_buffer_search_results(xx text_input_buffer);
-            }
-            return handled=true;
-
-        case .ARROW_LEFT;
-            if text_input_cursor > 0 then text_input_cursor -= 1;
-            request_redraw(tprint("text search at %", #line));
-            return handled=true;
-
-        case .ARROW_RIGHT;
-            if text_input_cursor < text_input_buffer.count then text_input_cursor += 1;
-            request_redraw(tprint("text search at %", #line));
-            return handled=true;
-
-        case .ARROW_UP; // TODO: history
-        case .ARROW_DOWN; // TODO: history
-
-        case .HOME;
-            text_input_cursor = 0;
-            request_redraw(tprint("text search at %", #line));
-            return handled=true;
-
-        case .END;
-            text_input_cursor = text_input_buffer.count;
-            request_redraw(tprint("text search at %", #line));
-            return handled=true;
-
-        case xx #char "V";
-            if event.ctrl_pressed {
-                text := os_clipboard_get_text(,, temp);
-                if text {
-                    text = replace(text, "\r\n", "",, temp);
-
-                    if text_input_buffer.count + text.count > MAX_SEARCH_STRING_LENGTH {
-                        // TODO: error reporting
-                        log_error("search string truncated to % (wanted to add %)", MAX_SEARCH_STRING_LENGTH, text.count);
-                        return handled=true;
-                    }
-
-                    array_insert_at(*text_input_buffer, cast([] u8) text, text_input_cursor);
-                    text_input_cursor += text.count;
-
-                    update_text_buffer_search_results(xx text_input_buffer);
-                    request_redraw(tprint("text search at %", #line));
-                }
-                return handled=true;
-            }
-
-        case .ENTER;
-            forwards := !event.shift_pressed;
-            jump_to_next_search_match(forwards);
-
-            return handled=true;
+    if status & .TEXT_CHANGED {
+        update_text_buffer_search_results(xx text_search_input.buffer);
     }
 
-    return handled=false;
+    if status & .ENTER_HIT {
+        forwards := !(status & .SHIFT_PRESSED);
+        jump_to_next_search_match(forwards);
+    }
+
+    if status & .CLOSED {
+        close_text_search_ui();
+    }
+
+    request_redraw("text search ui update");
+
+    return xx status;
 }
 
 jump_to_next_search_match :: (forwards: bool) {
@@ -2050,20 +1941,7 @@ draw_text_search_ui :: (rect: Rectangle, font: My_Dynamic_Font, handle_click: bo
     text_x := rect.left + text_x_tweak;
     text_y := bottom(rect) + text_y_tweak;
 
-    Simp.draw_text(font.regular, xx text_x, xx text_y, xx text_input_buffer, text_search_ui_text_color);
-
-    // TODO: scrolling
-    {
-        x := text_x + font.mono_width * text_input_cursor;
-        cursor_y_tweak := -2.0;
-        y := text_y + cursor_y_tweak;
-        w := 2;
-        h := font.line_height;
-
-        draw_axis_aligned_rectangle(x, y, xx w, xx h, text_search_ui_cursor_color);
-    }
-
-    click_handled := false;
+    click_handled := draw_text_input(*text_search_input, text_x, text_y, xx width(rect), font.regular, text_search_ui_text_color, handle_click);
 
     // do buttons
     if search_results.matches {
@@ -2485,6 +2363,170 @@ draw_icon :: (x: float, y: float, icon: Icon_Info) {
             draw_triangle(p0, p1, p2, icon.color);
 
     }
+}
+
+Text_Input_State :: struct {
+    buffer: [..] u8;
+    cursor: int;
+
+    max_length: int = -1;
+    // TODO: scroll
+}
+
+Text_Input_Status :: enum_flags {
+    HANDLED;
+    TEXT_CHANGED;
+    ENTER_HIT;
+    SHIFT_PRESSED;
+    CLOSED;
+}
+
+text_input_handle_event :: (state: *Text_Input_State, event: Input.Event) -> result: Text_Input_Status {
+    if !event.key_pressed return 0;
+    if event.alt_pressed return 0;
+
+    if !event.ctrl_pressed && event.key_code >= #char " " && event.key_code <= #char "~" {
+
+        char := cast(u8) event.key_code;
+        if event.shift_pressed {
+            if char == {
+                case #char "`";  char = #char "~";
+                case #char "1";  char = #char "!";
+                case #char "2";  char = #char "@";
+                case #char "3";  char = #char "#";
+                case #char "4";  char = #char "$";
+                case #char "5";  char = #char "%";
+                case #char "6";  char = #char "^";
+                case #char "7";  char = #char "&";
+                case #char "8";  char = #char "*";
+                case #char "9";  char = #char "(";
+                case #char "0";  char = #char ")";
+                case #char "-";  char = #char "_";
+                case #char "[";  char = #char "{";
+                case #char "]";  char = #char "}";
+                case #char "\\"; char = #char "|";
+                case #char ";";  char = #char ":";
+                case #char "'";  char = #char "\"";
+                case #char ",";  char = #char "<";
+                case #char ".";  char = #char ">";
+                case #char "/";  char = #char "?";
+            }
+        } else {
+            if char >= #char "A" && char <= #char "Z" {
+                char += #char "a" - #char "A";
+            } else if char == {
+                // WTF is this???
+                case #char "+"; char = #char "=";
+            }
+        }
+
+        if state.buffer.count + 1 > state.max_length {
+            // TODO: error reporting
+            log_error("text input truncated to % (wanted to add %)", state.max_length, 1);
+            return .HANDLED;
+        }
+
+        array_insert_at(*state.buffer, char, state.cursor);
+        state.cursor += 1;
+
+        return .TEXT_CHANGED;
+
+    } else if event.key_code == {
+        case .ESCAPE;
+            return .CLOSED;
+
+        case .BACKSPACE;
+            if state.cursor > 0 {
+                array_ordered_remove_range(*state.buffer, state.cursor - 1, state.cursor);
+                state.cursor -= 1;
+
+                return .TEXT_CHANGED;
+            }
+            return .HANDLED;
+
+        case .DELETE;
+            if state.buffer.count > 0 && state.cursor < state.buffer.count {
+                array_ordered_remove_range(*state.buffer, state.cursor, state.cursor + 1);
+
+                return .TEXT_CHANGED;
+            }
+            return .HANDLED;
+
+        case .ARROW_LEFT;
+            if state.cursor > 0 then state.cursor -= 1;
+            return .HANDLED;
+
+        case .ARROW_RIGHT;
+            if state.cursor < state.buffer.count then state.cursor += 1;
+            return .HANDLED;
+
+        case .ARROW_UP; // TODO: history
+        case .ARROW_DOWN; // TODO: history
+
+        case .HOME;
+            state.cursor = 0;
+            return .HANDLED;
+
+        case .END;
+            state.cursor = state.buffer.count;
+            return .HANDLED;
+
+        case xx #char "V";
+            if event.ctrl_pressed {
+                text := os_clipboard_get_text(,, temp);
+                if text {
+                    // XXX ugly and stupid
+                    text = replace(text, "\r\n", "",, temp);
+                    text = replace(text, "\r", "",, temp);
+                    text = replace(text, "\n", "",, temp);
+
+                    if state.buffer.count + text.count > state.max_length {
+                        // TODO: error reporting
+                        log_error("text input truncated to % (wanted to add %)", state.max_length, text.count);
+                        return .HANDLED;
+                    }
+
+                    array_insert_at(*state.buffer, cast([] u8) text, state.cursor);
+                    state.cursor += text.count;
+                    return .TEXT_CHANGED;
+                }
+                return .HANDLED;
+            }
+
+        case .ENTER;
+            if event.shift_pressed
+                return .ENTER_HIT | .SHIFT_PRESSED;
+
+            return .ENTER_HIT;
+    }
+
+    return 0;
+}
+
+draw_text_input :: (state: *Text_Input_State, x: float, y: float, w: float, font: *Simp.Dynamic_Font, fg_color: Vector4, handle_click: bool) -> click_handled: bool {
+    // @INCOMPLETE TODO:
+    // - scrolling
+    // - mouse handling
+
+    Simp.draw_text(font, xx x, xx y, xx state.buffer, text_search_ui_text_color);
+
+    assert(font.temporary_glyphs.count == state.buffer.count);
+    cursor_x := x;
+    for font.temporary_glyphs {
+        if it_index >= state.cursor break;
+        cursor_x += it.advance;
+    }
+
+    {
+        cursor_y_tweak := -2.0;
+        cursor_y := y + cursor_y_tweak;
+        w := 2;
+        h := (font.character_height - font.typical_descender);
+
+        draw_axis_aligned_rectangle(cursor_x, cursor_y, xx w, xx h, fg_color);
+    }
+
+    return false;
 }
 
 //
