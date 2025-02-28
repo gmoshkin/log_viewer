@@ -1040,7 +1040,9 @@ draw_the_text_pane :: (rect: Rectangle) {
             color = lerp(color_orange, color_red, xx color_t);
         }
 
-        x_prev := cast(float) left(rect);
+        line_width := 2.5;
+        W := width(rect) - line_width;
+        x_prev := cast(float) left(rect) + line_width / 2.0;
         y_prev := y_top;
         seen_time_stamp := false;
         for line_index: first_line..last_line {
@@ -1057,14 +1059,14 @@ draw_the_text_pane :: (rect: Rectangle) {
 
             if isnan(t) then t = 0.5;
 
-            x := cast(float, left(rect) + width(rect) * t);
+            x := cast(float, left(rect) + line_width / 2.0 + W * t);
 
             if !seen_time_stamp {
                 x_prev, y_prev = x, y;
                 seen_time_stamp = true;
             }
 
-            draw_fat_line(.{x_prev, y_prev}, .{x, y}, 2.5, color);
+            draw_fat_line(.{x_prev, y_prev}, .{x, y}, line_width, color);
 
             x_prev, y_prev = x, y;
         }
