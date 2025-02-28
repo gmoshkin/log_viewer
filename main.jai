@@ -29,9 +29,6 @@ TODO:
 */
 
 main :: () {
-    // run_tests();
-    // return;
-
     Profile();
 
     context.logger = my_logger;
@@ -39,6 +36,13 @@ main :: () {
 
     log("working directory: '%'", get_working_directory());
     from_clipboard := parse_command_line_arguments();
+
+    if run_tests_mode {
+        run_tests();
+        return;
+    }
+    // Temporary?
+    run_tests();
 
     #if OS == .WINDOWS {
         // In order to have a hope of waiting a reasonable amount of time,
@@ -2656,6 +2660,7 @@ key_is_down :: ($char: string) -> bool #expand {
 
 input_file_full_path: string;
 input_from_clipboard: bool;
+run_tests_mode: bool;
 
 parse_command_line_arguments :: () {
     args := get_command_line_arguments();
@@ -2671,6 +2676,10 @@ parse_command_line_arguments :: () {
         if arg == {
             case "-clipboard";
                 input_from_clipboard = true;
+                cursor += 1;
+                continue;
+            case "-run-tests";
+                run_tests_mode = true;
                 cursor += 1;
                 continue;
         }
@@ -3724,12 +3733,14 @@ pretty_assert :: (code: Code, loc := #caller_location) #expand {
 //
 
 run_tests :: () {
+    t0 := seconds_since_init();
     log("running tests...");
-    test_search_for_match();
-    test_array_insert_at();
-    test_quick_sort();
-    test_parse_date_time_stamp();
-    log("\e[32mtests passed!\e[0m");
+    log("test_search_for_match");          test_search_for_match();
+    log("test_array_insert_at");           test_array_insert_at();
+    log("test_quick_sort");                test_quick_sort();
+    log("test_parse_date_time_stamp");     test_parse_date_time_stamp();
+    elapsed := seconds_since_init() - t0;
+    log("\e[32mtests passed!\e[0m elapsed %", fmt(elapsed, 3));
 }
 
 WANTED_MSAA :: 8;
