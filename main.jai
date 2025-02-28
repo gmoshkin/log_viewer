@@ -277,6 +277,8 @@ update_and_draw_frame :: () -> bool {
             // if text_search_ui_active && !axis_aligned_rectangle_contains(text_search_ui_rect, mouse) {
             //     text_search_ui_active = false;
             // }
+        } else if draggin_scroll_bar && it.key_code == .MOUSE_BUTTON_LEFT && !it.key_pressed {
+            request_redraw("stopped draggin scroll bar");
         } else if it.key_code == .MOUSE_BUTTON_RIGHT && it.key_pressed {
             request_redraw("mouse right click");
             mouse_at_click = mouse;
@@ -453,6 +455,12 @@ update_and_draw_frame :: () -> bool {
             } else if is_click(.MOUSE_BUTTON_RIGHT) {
                 anchor_button_open_popup_menu(line_index, mouse);
             }
+        } else if axis_aligned_rectangle_contains(scroll_bar_rect, mouse) && is_click(.MOUSE_BUTTON_LEFT) {
+            pixels_from_top := top(scroll_bar_rect) - mouse.y;
+            fraction_from_top := pixels_from_top / height(scroll_bar_rect);
+            line_index := total_line_count * fraction_from_top;
+            target_scroll_rows = xx (line_index - text_pane_row_count / 2);
+            request_redraw(tprint("scroll bar anchors at %", #line));
         }
 
         if anchor_index != hovered_scroll_bar_anchor_index || anchor_kind != hovered_scroll_bar_anchor_kind {
@@ -600,7 +608,8 @@ update_and_draw_frame :: () -> bool {
 
         // update scroll bar slider
         color := scroll_bar_slider_color;
-        if is_click(.MOUSE_BUTTON_LEFT) && axis_aligned_rectangle_contains(xx x, xx y, xx w, xx h, mouse) {
+        mouse_over_slider := axis_aligned_rectangle_contains(xx x, xx y, xx w, xx h, mouse);
+        if is_click(.MOUSE_BUTTON_LEFT) && mouse_over_slider {
             draggin_scroll_bar = true;
             mouse_event_handled = true;
             scroll_rows_at_click = scroll_rows;
@@ -641,25 +650,6 @@ update_and_draw_frame :: () -> bool {
             }
         }
 
-        // draw visible scroll bar slider border
-        {
-            slider_oversize := 2;
-            X := x - slider_oversize;
-            Y := y - slider_oversize;
-            W := w + slider_oversize;
-            H := h + 2 * slider_oversize;
-            draw_hollow_axis_aligned_rectangle(xx X, xx Y, xx W, xx H, border = 2, color);
-        }
-
-        // draw effective scroll bar slider
-        if scroll_bar_slider_visible_height != scroll_bar_slider_effective_height {
-            color := scroll_bar_effective_slider_color;
-            x_pad := 2;
-            h := scroll_bar_slider_effective_height;
-            y := rect.top - scroll_y - h;
-            draw_axis_aligned_rectangle(xx (x + x_pad), y, xx (w - 2 * x_pad), xx h, color);
-        }
-
         // draw scroll bar anchors
         {
             mouse_in_rect := mouse - .{xx scroll_bar_rect.left, xx bottom(scroll_bar_rect)};
@@ -668,14 +658,40 @@ update_and_draw_frame :: () -> bool {
                 search_match_index = do_scroll_bar_anchors(scroll_bar_rect, search_results.matches, search_match_color, .DRAW, mouse_in_rect);
             // explicit anchors have higher priority
             explicit_anchor_index := do_scroll_bar_anchors(scroll_bar_rect, explicit_anchors, anchor_button_active_color, .DRAW, mouse_in_rect, t=15);
-            if explicit_anchor_index != -1 {
-                line_index := explicit_anchors[explicit_anchor_index].line_index;
-                draw_single_scroll_bar_anchor(scroll_bar_rect, line_index, anchor_button_active_color, hover=true, t=15);
-            } else if search_match_index != -1 {
-                match := search_results.matches[search_match_index];
-                color := get_log_source_color(match.source_id);
-                draw_single_scroll_bar_anchor(scroll_bar_rect, match.line_index, color, hover=true);
+            if !mouse_over_slider {
+                if explicit_anchor_index != -1 {
+                    line_index := explicit_anchors[explicit_anchor_index].line_index;
+                    draw_single_scroll_bar_anchor(scroll_bar_rect, line_index, anchor_button_active_color, hover=true, t=15);
+                } else if search_match_index != -1 {
+                    match := search_results.matches[search_match_index];
+                    color := get_log_source_color(match.source_id);
+                    draw_single_scroll_bar_anchor(scroll_bar_rect, match.line_index, color, hover=true);
+                }
             }
+        }
+
+        // draw visible scroll bar slider border
+        {
+            slider_oversize := 2.0;
+            border := 2.0;
+            if mouse_over_slider || draggin_scroll_bar {
+                slider_oversize = 3.0;
+                border = 4.0;
+            }
+            X := x - slider_oversize;
+            Y := y - slider_oversize;
+            W := w + slider_oversize;
+            H := h + 2 * slider_oversize;
+            draw_hollow_axis_aligned_rectangle(xx X, xx Y, xx W, xx H, border, color);
+        }
+
+        // draw effective scroll bar slider
+        if scroll_bar_slider_visible_height != scroll_bar_slider_effective_height {
+            color := scroll_bar_effective_slider_color;
+            x_pad := 1;
+            h := scroll_bar_slider_effective_height;
+            y := rect.top - scroll_y - h;
+            draw_axis_aligned_rectangle(xx (x + x_pad - 1), y, xx (w - 2 * x_pad), xx h, color);
         }
 
         if text_search_ui_open {
