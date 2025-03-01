@@ -291,10 +291,12 @@ update_and_draw_frame :: () -> bool {
         else if it.type == .MOUSE_WHEEL && modifiers == .CTRL && !draggin_scroll_bar {
             ofs := it.wheel_delta / it.typical_wheel_delta;
 
-            main_font.pixel_height += ofs;
-            main_font.pixel_height = max(main_font.pixel_height, 1);
-            reload_main_font();
-            request_redraw(tprint("scroll at %", #line));
+            if ofs != 0 {
+                main_font.pixel_height += ofs;
+                main_font.pixel_height = max(main_font.pixel_height, 1);
+                reload_main_font();
+                request_redraw(tprint("scroll at %", #line));
+            }
         }
 
         // modules/Input doesn't set it.ctrl_pressed for MOUSE_WHEEL :(
@@ -2459,8 +2461,10 @@ text_input_handle_event :: (state: *Text_Input_State, event: Input.Event) -> res
 
         case .BACKSPACE;
             if state.cursor > 0 {
-                array_ordered_remove_range(*state.buffer, state.cursor - 1, state.cursor);
-                state.cursor -= 1;
+                delete_to := ifx event.ctrl_pressed then find_previous_word_start(xx state.buffer, state.cursor)
+                                                    else state.cursor - 1;
+                array_ordered_remove_range(*state.buffer, delete_to, state.cursor);
+                state.cursor = delete_to;
 
                 return .TEXT_CHANGED;
             }
@@ -2468,18 +2472,26 @@ text_input_handle_event :: (state: *Text_Input_State, event: Input.Event) -> res
 
         case .DELETE;
             if state.buffer.count > 0 && state.cursor < state.buffer.count {
-                array_ordered_remove_range(*state.buffer, state.cursor, state.cursor + 1);
+                delete_to := ifx event.ctrl_pressed then find_next_word_end(xx state.buffer, state.cursor)
+                                                    else state.cursor + 1;
+                array_ordered_remove_range(*state.buffer, state.cursor, delete_to);
 
                 return .TEXT_CHANGED;
             }
             return .HANDLED;
 
         case .ARROW_LEFT;
-            if state.cursor > 0 then state.cursor -= 1;
+            if state.cursor > 0 {
+                if event.ctrl_pressed then state.cursor = find_previous_word_start(xx state.buffer, state.cursor);
+                                      else state.cursor -= 1;
+            }
             return .HANDLED;
 
         case .ARROW_RIGHT;
-            if state.cursor < state.buffer.count then state.cursor += 1;
+            if state.cursor < state.buffer.count {
+                if event.ctrl_pressed then state.cursor = find_next_word_end(xx state.buffer, state.cursor);
+                                      else state.cursor += 1;
+            }
             return .HANDLED;
 
         case .ARROW_UP; // TODO: history
@@ -2523,6 +2535,32 @@ text_input_handle_event :: (state: *Text_Input_State, event: Input.Event) -> res
     }
 
     return 0;
+}
+
+find_previous_word_start :: (text: string, cursor: int) -> new_cursor: int {
+    new_cursor := cursor;
+    // First find the previous word
+    while new_cursor > 0 && inline is_space(text[new_cursor - 1]) {
+        new_cursor -= 1;
+    }
+    // Second find the word's start
+    while new_cursor > 0 && !inline is_space(text[new_cursor - 1]) {
+        new_cursor -= 1;
+    }
+    return new_cursor;
+}
+
+find_next_word_end :: (text: string, cursor: int) -> new_cursor: int {
+    new_cursor := cursor;
+    // First find the next word
+    while new_cursor < text.count && inline is_space(text[new_cursor]) {
+        new_cursor += 1;
+    }
+    // Second find the word's end
+    while new_cursor < text.count && !inline is_space(text[new_cursor]) {
+        new_cursor += 1;
+    }
+    return new_cursor;
 }
 
 draw_text_input :: (state: *Text_Input_State, x: float, y: float, w: float, font: *Simp.Dynamic_Font, fg_color: Vector4, handle_click: bool) -> click_handled: bool {
