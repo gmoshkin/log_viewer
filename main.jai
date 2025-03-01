@@ -736,6 +736,7 @@ update_and_draw_frame :: () -> bool {
         if global_time_range_max != APOLLO_TIME_INVALID then print_time_for_log(*builder, to_calendar(global_time_range_max));
                                                         else print(*builder, "?");
         print(*builder, "\n");
+        print(*builder, "click_streak: %\n", text_search_input.click_streak);
         for redraw_reasons print(*builder, "%\n", it);
 
         pane_text := builder_to_string(*builder,, temp);
@@ -2397,9 +2398,12 @@ Text_Input_State :: struct {
     flags: enum_flags {
         SELECTION_ACTIVE;
         SELECTION_DRAGGING;
+        SELECTION_BY_WORD;
     };
 
     last_click_time := 0.0;
+    double_click_period := 0.3;
+    click_streak := 0;
 
     max_length: int = -1;
     // TODO: scroll
@@ -2452,7 +2456,7 @@ text_input_handle_event :: (state: *Text_Input_State, event: Input.Event) -> res
             }
         }
 
-        if state.flags & .SELECTION_ACTIVE text_input_remove_selection(state);
+        if state.flags & .SELECTION_ACTIVE text_input_delete_selection(state);
 
         if state.buffer.count + 1 > state.max_length {
             // TODO: error reporting
@@ -2472,7 +2476,7 @@ text_input_handle_event :: (state: *Text_Input_State, event: Input.Event) -> res
 
         case .BACKSPACE;
             if state.flags & .SELECTION_ACTIVE {
-                text_input_remove_selection(state);
+                text_input_delete_selection(state);
             } else if state.cursor > 0 {
                 delete_to := ifx event.ctrl_pressed then find_previous_word_start(xx state.buffer, state.cursor)
                                                     else state.cursor - 1;
@@ -2485,8 +2489,8 @@ text_input_handle_event :: (state: *Text_Input_State, event: Input.Event) -> res
 
         case .DELETE;
             if state.flags & .SELECTION_ACTIVE {
-                text_input_remove_selection(state);
-            } else if state.cursor > 0 && state.cursor < state.buffer.count {
+                text_input_delete_selection(state);
+            } else if state.cursor < state.buffer.count {
                 delete_to := ifx event.ctrl_pressed then find_next_word_end(xx state.buffer, state.cursor)
                                                     else state.cursor + 1;
                 array_ordered_remove_range(*state.buffer, state.cursor, delete_to);
@@ -2530,7 +2534,7 @@ text_input_handle_event :: (state: *Text_Input_State, event: Input.Event) -> res
 
         case xx #char "V";
             if event.ctrl_pressed {
-                if state.flags & .SELECTION_ACTIVE text_input_remove_selection(state);
+                if state.flags & .SELECTION_ACTIVE text_input_delete_selection(state);
                 text := os_clipboard_get_text(,, temp);
                 if text {
                     // XXX ugly and stupid
@@ -2548,6 +2552,26 @@ text_input_handle_event :: (state: *Text_Input_State, event: Input.Event) -> res
                     state.cursor += text.count;
                     return .TEXT_CHANGED;
                 }
+                return .HANDLED;
+            }
+
+        case xx #char "C";
+            if event.ctrl_pressed && (state.flags & .SELECTION_ACTIVE) {
+                start, end := min_max(state.selection_start, state.cursor);
+                to_copy := array_view(state.buffer, start, end - start);
+                os_clipboard_set_text(xx to_copy);
+
+                return .HANDLED;
+            }
+
+        case xx #char "X";
+            if event.ctrl_pressed && (state.flags & .SELECTION_ACTIVE) {
+                start := min(state.selection_start, state.cursor);
+                count := abs(state.selection_start - state.cursor);
+                to_copy := array_view(state.buffer, start, count);
+                os_clipboard_set_text(xx to_copy);
+                text_input_delete_selection(state);
+
                 return .HANDLED;
             }
 
@@ -2584,39 +2608,69 @@ text_input_update_selection_state_for_movement :: inline (state: *Text_Input_Sta
     return false;
 }
 
-text_input_remove_selection :: (state: *Text_Input_State) {
+text_input_delete_selection :: (state: *Text_Input_State) {
+    state.flags &= ~.SELECTION_ACTIVE;
+    if state.cursor == state.selection_start return;
     start := state.cursor;
     end := state.selection_start;
     if start > end then Swap(*start, *end);
     array_ordered_remove_range(*state.buffer, start, end);
     state.cursor = start;
-    state.flags &= ~.SELECTION_ACTIVE;
 }
 
-find_previous_word_start :: (text: string, cursor: int) -> new_cursor: int {
-    new_cursor := cursor;
+find_previous_word_start :: (text: string, cursor: int) -> start: int {
+    start := cursor;
     // First find the previous word
-    while new_cursor > 0 && inline is_space(text[new_cursor - 1]) {
-        new_cursor -= 1;
+    while start > 0 && inline is_space(text[start - 1]) {
+        start -= 1;
     }
     // Second find the word's start
-    while new_cursor > 0 && !inline is_space(text[new_cursor - 1]) {
-        new_cursor -= 1;
+    while start > 0 && !inline is_space(text[start - 1]) {
+        start -= 1;
     }
-    return new_cursor;
+    return start;
 }
 
-find_next_word_end :: (text: string, cursor: int) -> new_cursor: int {
-    new_cursor := cursor;
+find_next_word_end :: (text: string, cursor: int) -> end: int {
+    end := cursor;
     // First find the next word
-    while new_cursor < text.count && inline is_space(text[new_cursor]) {
-        new_cursor += 1;
+    while end < text.count && inline is_space(text[end]) {
+        end += 1;
     }
     // Second find the word's end
-    while new_cursor < text.count && !inline is_space(text[new_cursor]) {
-        new_cursor += 1;
+    while end < text.count && !inline is_space(text[end]) {
+        end += 1;
     }
-    return new_cursor;
+    return end;
+}
+
+find_word_around_cursor :: (text: string, cursor: int) -> (start: s32, count: s32) {
+    start := cursor;
+    // First find the previous word
+    while start > 0 && inline is_space(text[start - 1]) {
+        start -= 1;
+    }
+
+    // Second find the word's start
+    while start > 0 && !inline is_space(text[start - 1]) {
+        start -= 1;
+    }
+
+    // Third find the word's end
+    count := 0;
+    while start + count < text.count && !inline is_space(text[start + count]) {
+        count += 1;
+    }
+
+    return xx start, xx count;
+}
+
+text_input_update_click_streak :: (using state: *Text_Input_State) -> int {
+    t := seconds_since_init();
+    if t - last_click_time < double_click_period then click_streak += 1;
+                                                 else click_streak = 1;
+    last_click_time = xx t;
+    return click_streak;
 }
 
 draw_text_input :: (state: *Text_Input_State, rect: Rectangle, x: float, y: float, font: *Simp.Dynamic_Font, fg_color: Vector4, handle_mouse: bool) -> click_handled: bool {
@@ -2625,7 +2679,7 @@ draw_text_input :: (state: *Text_Input_State, rect: Rectangle, x: float, y: floa
     // - mouse handling
 
     if (state.flags & .SELECTION_DRAGGING) && !is_down(.MOUSE_BUTTON_LEFT) {
-        state.flags &= ~.SELECTION_DRAGGING;
+        state.flags &= ~.SELECTION_DRAGGING & ~.SELECTION_BY_WORD;
     }
 
     cursor_y_tweak := -2.0;
@@ -2636,16 +2690,49 @@ draw_text_input :: (state: *Text_Input_State, rect: Rectangle, x: float, y: floa
 
     click_handled := false;
     mouse_in_rect := axis_aligned_rectangle_contains(rect, mouse);
-    if handle_mouse && mouse_in_rect && ((state.flags & .SELECTION_DRAGGING) || is_click(.MOUSE_BUTTON_LEFT)) {
+    click := is_click(.MOUSE_BUTTON_LEFT);
+    if handle_mouse && mouse_in_rect && ((state.flags & .SELECTION_DRAGGING) || click) {
+        if click then text_input_update_click_streak(state);
+
         new_cursor := cursor_position_from_temporary_glyphs(rect, font.temporary_glyphs, x, mouse.x);
-        if new_cursor != -1 {
-            state.cursor = new_cursor;
-            if !(state.flags & .SELECTION_DRAGGING) {
-                state.selection_start = new_cursor;
-                state.flags |= (.SELECTION_DRAGGING | .SELECTION_ACTIVE);
+
+        if click && state.click_streak == 3 {
+            state.selection_start = 0;
+            state.cursor = state.buffer.count;
+            state.flags |= .SELECTION_ACTIVE;
+            state.flags &= ~.SELECTION_DRAGGING & ~.SELECTION_BY_WORD;
+        } else if new_cursor != -1 {
+            if click && state.click_streak == 2 {
+                start, count := find_word_around_cursor(xx state.buffer, new_cursor);
+                state.selection_start = start;
+                state.cursor = start + count;
+                state.flags |= (.SELECTION_DRAGGING | .SELECTION_ACTIVE | .SELECTION_BY_WORD);
+            } else {
+                if state.flags & .SELECTION_BY_WORD {
+                    // FIXME: this is not working correctly. It should remember
+                    // the position of the word where the selection started and
+                    // when mouse moves the it should extend the selection only
+                    // temporarily
+                    start, count := find_word_around_cursor(xx state.buffer, new_cursor);
+                    selection_start, selection_end := min_max(state.selection_start, state.cursor);
+                    if start < selection_start {
+                        state.selection_start = selection_end;
+                        state.cursor = start;
+                    } else if start + count > selection_end {
+                        state.selection_start = selection_start;
+                        state.cursor = start + count;
+                    }
+                } else {
+                    state.cursor = new_cursor;
+                }
+                if !(state.flags & .SELECTION_DRAGGING) {
+                    state.selection_start = new_cursor;
+                    state.flags |= (.SELECTION_DRAGGING | .SELECTION_ACTIVE);
+                }
             }
-            click_handled = true;
         }
+
+        click_handled = true;
     }
 
     cursor_x := x;
@@ -2657,9 +2744,8 @@ draw_text_input :: (state: *Text_Input_State, rect: Rectangle, x: float, y: floa
     }
 
     if state.flags & .SELECTION_ACTIVE {
-        start := min(selection_start_x, cursor_x);
-        width := abs(selection_start_x - cursor_x);
-        draw_axis_aligned_rectangle(start, cursor_y, width, xx cursor_h, color_orange);
+        start, end := min_max(selection_start_x, cursor_x);
+        draw_axis_aligned_rectangle(start, cursor_y, end - start, xx cursor_h, color_orange);
     }
 
     Simp.draw_prepared_text(font, xx x, xx y, text_search_ui_text_color);
@@ -3773,6 +3859,11 @@ as_bytes :: (data: *$T, count: s64) -> [] u8 {
     result.data = xx data;
     result.count = size_of(T) * count;
     return result;
+}
+
+min_max :: inline (a: $T, b: T) -> (min: T, max: T) {
+    if a < b return a, b;
+    return b, a;
 }
 
 last :: (array: [] $T) -> T #expand {
