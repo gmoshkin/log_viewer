@@ -249,9 +249,9 @@ update_and_draw_frame :: () -> bool {
 
     for Input.events_this_frame {
         modifiers: enum_flags { NONE :: 0x00; CTRL :: 0x01; SHIFT :: 0x02; ALT :: 0x04; };
-        if key_is_down(.CTRL)  modifiers |= .CTRL;
-        if key_is_down(.SHIFT) modifiers |= .SHIFT;
-        if key_is_down(.ALT)   modifiers |= .ALT;
+        if is_down(.CTRL)  modifiers |= .CTRL;
+        if is_down(.SHIFT) modifiers |= .SHIFT;
+        if is_down(.ALT)   modifiers |= .ALT;
 
         // if !it.repeat {
         //     if it.type == .MOUSE_WHEEL
@@ -394,7 +394,7 @@ update_and_draw_frame :: () -> bool {
         scroll_rows = clamp(scroll_rows, 0, total_line_count - text_pane_row_count / 2.0);
         target_scroll_rows = scroll_rows;
 
-        if !key_is_down(.MOUSE_BUTTON_LEFT) draggin_scroll_bar = false;
+        if !is_down(.MOUSE_BUTTON_LEFT) draggin_scroll_bar = false;
 
         if mouse != mouse_last_frame {
             request_redraw(tprint("scroll at %", #line));
@@ -1965,7 +1965,7 @@ draw_text_search_ui :: (rect: Rectangle, font: My_Dynamic_Font, handle_click: bo
     text_x := rect.left + text_x_tweak;
     text_y := bottom(rect) + text_y_tweak;
 
-    click_handled := draw_text_input(*text_search_input, text_x, text_y, xx width(rect), font.regular, text_search_ui_text_color, handle_click);
+    click_handled := draw_text_input(*text_search_input, rect, text_x, text_y, font.regular, text_search_ui_text_color, handle_click);
 
     // do buttons
     if search_results.matches {
@@ -2392,6 +2392,14 @@ draw_icon :: (x: float, y: float, icon: Icon_Info) {
 Text_Input_State :: struct {
     buffer: [..] u8;
     cursor: int;
+    selection_start: int;
+
+    flags: enum_flags {
+        SELECTION_ACTIVE;
+        SELECTION_DRAGGING;
+    };
+
+    last_click_time := 0.0;
 
     max_length: int = -1;
     // TODO: scroll
@@ -2444,6 +2452,8 @@ text_input_handle_event :: (state: *Text_Input_State, event: Input.Event) -> res
             }
         }
 
+        if state.flags & .SELECTION_ACTIVE text_input_remove_selection(state);
+
         if state.buffer.count + 1 > state.max_length {
             // TODO: error reporting
             log_error("text input truncated to % (wanted to add %)", state.max_length, 1);
@@ -2457,10 +2467,13 @@ text_input_handle_event :: (state: *Text_Input_State, event: Input.Event) -> res
 
     } else if event.key_code == {
         case .ESCAPE;
+            state.flags &= ~.SELECTION_ACTIVE;
             return .CLOSED;
 
         case .BACKSPACE;
-            if state.cursor > 0 {
+            if state.flags & .SELECTION_ACTIVE {
+                text_input_remove_selection(state);
+            } else if state.cursor > 0 {
                 delete_to := ifx event.ctrl_pressed then find_previous_word_start(xx state.buffer, state.cursor)
                                                     else state.cursor - 1;
                 array_ordered_remove_range(*state.buffer, delete_to, state.cursor);
@@ -2471,7 +2484,9 @@ text_input_handle_event :: (state: *Text_Input_State, event: Input.Event) -> res
             return .HANDLED;
 
         case .DELETE;
-            if state.buffer.count > 0 && state.cursor < state.buffer.count {
+            if state.flags & .SELECTION_ACTIVE {
+                text_input_remove_selection(state);
+            } else if state.cursor > 0 && state.cursor < state.buffer.count {
                 delete_to := ifx event.ctrl_pressed then find_next_word_end(xx state.buffer, state.cursor)
                                                     else state.cursor + 1;
                 array_ordered_remove_range(*state.buffer, state.cursor, delete_to);
@@ -2481,14 +2496,20 @@ text_input_handle_event :: (state: *Text_Input_State, event: Input.Event) -> res
             return .HANDLED;
 
         case .ARROW_LEFT;
-            if state.cursor > 0 {
+            ended := text_input_update_selection_state_for_movement(state, event.shift_pressed);
+            if ended {
+                state.cursor = min(state.cursor, state.selection_start);
+            } else if state.cursor > 0 {
                 if event.ctrl_pressed then state.cursor = find_previous_word_start(xx state.buffer, state.cursor);
                                       else state.cursor -= 1;
             }
             return .HANDLED;
 
         case .ARROW_RIGHT;
-            if state.cursor < state.buffer.count {
+            ended := text_input_update_selection_state_for_movement(state, event.shift_pressed);
+            if ended {
+                state.cursor = max(state.cursor, state.selection_start);
+            } else if state.cursor < state.buffer.count {
                 if event.ctrl_pressed then state.cursor = find_next_word_end(xx state.buffer, state.cursor);
                                       else state.cursor += 1;
             }
@@ -2498,15 +2519,18 @@ text_input_handle_event :: (state: *Text_Input_State, event: Input.Event) -> res
         case .ARROW_DOWN; // TODO: history
 
         case .HOME;
+            text_input_update_selection_state_for_movement(state, event.shift_pressed);
             state.cursor = 0;
             return .HANDLED;
 
         case .END;
+            text_input_update_selection_state_for_movement(state, event.shift_pressed);
             state.cursor = state.buffer.count;
             return .HANDLED;
 
         case xx #char "V";
             if event.ctrl_pressed {
+                if state.flags & .SELECTION_ACTIVE text_input_remove_selection(state);
                 text := os_clipboard_get_text(,, temp);
                 if text {
                     // XXX ugly and stupid
@@ -2527,6 +2551,14 @@ text_input_handle_event :: (state: *Text_Input_State, event: Input.Event) -> res
                 return .HANDLED;
             }
 
+        case xx #char "A";
+            if event.ctrl_pressed {
+                state.selection_start = 0;
+                state.cursor = state.buffer.count;
+                state.flags |= .SELECTION_ACTIVE;
+                return .HANDLED;
+            }
+
         case .ENTER;
             if event.shift_pressed
                 return .ENTER_HIT | .SHIFT_PRESSED;
@@ -2535,6 +2567,30 @@ text_input_handle_event :: (state: *Text_Input_State, event: Input.Event) -> res
     }
 
     return 0;
+}
+
+text_input_update_selection_state_for_movement :: inline (state: *Text_Input_State, shift_pressed: bool) -> selection_ended: bool {
+    is_active := state.flags & .SELECTION_ACTIVE;
+    if is_active && !shift_pressed {
+        state.flags &= ~.SELECTION_ACTIVE;
+        return true;
+    }
+
+    if !is_active && shift_pressed {
+        state.flags |= .SELECTION_ACTIVE;
+        state.selection_start = state.cursor;
+    }
+
+    return false;
+}
+
+text_input_remove_selection :: (state: *Text_Input_State) {
+    start := state.cursor;
+    end := state.selection_start;
+    if start > end then Swap(*start, *end);
+    array_ordered_remove_range(*state.buffer, start, end);
+    state.cursor = start;
+    state.flags &= ~.SELECTION_ACTIVE;
 }
 
 find_previous_word_start :: (text: string, cursor: int) -> new_cursor: int {
@@ -2563,30 +2619,77 @@ find_next_word_end :: (text: string, cursor: int) -> new_cursor: int {
     return new_cursor;
 }
 
-draw_text_input :: (state: *Text_Input_State, x: float, y: float, w: float, font: *Simp.Dynamic_Font, fg_color: Vector4, handle_click: bool) -> click_handled: bool {
+draw_text_input :: (state: *Text_Input_State, rect: Rectangle, x: float, y: float, font: *Simp.Dynamic_Font, fg_color: Vector4, handle_mouse: bool) -> click_handled: bool {
     // @INCOMPLETE TODO:
     // - scrolling
     // - mouse handling
 
-    Simp.draw_text(font, xx x, xx y, xx state.buffer, text_search_ui_text_color);
-
-    assert(font.temporary_glyphs.count == state.buffer.count);
-    cursor_x := x;
-    for font.temporary_glyphs {
-        if it_index >= state.cursor break;
-        cursor_x += it.advance;
+    if (state.flags & .SELECTION_DRAGGING) && !is_down(.MOUSE_BUTTON_LEFT) {
+        state.flags &= ~.SELECTION_DRAGGING;
     }
+
+    cursor_y_tweak := -2.0;
+    cursor_y := y + cursor_y_tweak;
+    cursor_h := (font.character_height - font.typical_descender);
+
+    Simp.prepare_text(font, xx state.buffer);
+
+    click_handled := false;
+    mouse_in_rect := axis_aligned_rectangle_contains(rect, mouse);
+    if handle_mouse && mouse_in_rect && ((state.flags & .SELECTION_DRAGGING) || is_click(.MOUSE_BUTTON_LEFT)) {
+        new_cursor := cursor_position_from_temporary_glyphs(rect, font.temporary_glyphs, x, mouse.x);
+        if new_cursor != -1 {
+            state.cursor = new_cursor;
+            if !(state.flags & .SELECTION_DRAGGING) {
+                state.selection_start = new_cursor;
+                state.flags |= (.SELECTION_DRAGGING | .SELECTION_ACTIVE);
+            }
+            click_handled = true;
+        }
+    }
+
+    cursor_x := x;
+    selection_start_x := x;
+    for font.temporary_glyphs {
+        if it_index < state.cursor          then cursor_x          += it.advance;
+        if it_index < state.selection_start then selection_start_x += it.advance;
+        if it_index >= state.cursor && it_index >= state.selection_start break;
+    }
+
+    if state.flags & .SELECTION_ACTIVE {
+        start := min(selection_start_x, cursor_x);
+        width := abs(selection_start_x - cursor_x);
+        draw_axis_aligned_rectangle(start, cursor_y, width, xx cursor_h, color_orange);
+    }
+
+    Simp.draw_prepared_text(font, xx x, xx y, text_search_ui_text_color);
 
     {
-        cursor_y_tweak := -2.0;
-        cursor_y := y + cursor_y_tweak;
-        w := 2;
-        h := (font.character_height - font.typical_descender);
+        cursor_w := 2;
 
-        draw_axis_aligned_rectangle(cursor_x, cursor_y, xx w, xx h, fg_color);
+        draw_axis_aligned_rectangle(cursor_x, cursor_y, xx cursor_w, xx cursor_h, fg_color);
     }
 
-    return false;
+    return click_handled;
+}
+
+cursor_position_from_temporary_glyphs :: (rect: Rectangle, temporary_glyphs: [] *Simp.Glyph_Data, text_x: float, mouse_x: float) -> cursor: int {
+    prev_middle := cast(float) rect.left;
+    curr_offset := text_x;
+    for temporary_glyphs {
+        curr_middle := curr_offset + it.advance / 2;
+        if (mouse_x >= prev_middle) && (mouse_x <= curr_middle) {
+            return it_index;
+        }
+
+        curr_offset += it.advance;
+        prev_middle = curr_middle;
+    }
+    if (mouse_x >= prev_middle) && (mouse_x <= xx right(rect)) {
+        return temporary_glyphs.count;
+    }
+
+    return -1;
 }
 
 //
@@ -2701,11 +2804,11 @@ is_click :: (code: Input.Key_Code) -> bool #expand {
     return xx (Input.input_button_states[code] & .START);
 }
 
-key_is_down :: (code: Input.Key_Code) -> bool #expand {
+is_down :: (code: Input.Key_Code) -> bool #expand {
     return xx (Input.input_button_states[code] & .DOWN);
 }
 
-key_is_down :: ($char: string) -> bool #expand {
+is_down :: ($char: string) -> bool #expand {
     #assert char.count == 1;
     return xx (Input.input_button_states[char[0]] & .DOWN);
 }
