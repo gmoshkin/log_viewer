@@ -568,7 +568,7 @@ update_and_draw_frame :: () -> bool {
     {
         profile_t0 = seconds_since_init();
         draw_the_text_pane(*the_text_buffer, text_pane_rect);
-        Profile();
+        Profile("draw_the_text_pane");
 
         // draw the side bars to fix the ugly text bleed over
         left_rect := window_rect;
@@ -1284,7 +1284,7 @@ draw_search_match_border :: (parent_rect: Rectangle, font: My_Dynamic_Font, text
     }
 
     // @INCOMPLETE unicode not supported
-    w := search_results.search_string.count * font.mono_width + border_width * 2;
+    w := search_match.match_count * font.mono_width + border_width * 2;
     if x_in_rect + w < 0 {
         p0 := Vector2.{xx parent_rect.left, y_bottom + h/2};
         p1 := p0 + .{h23, -h23};
@@ -1333,6 +1333,8 @@ Log_Text_Buffer :: struct {
     all_fiber_names: [..] string;
     // string owned by `all_text`
     all_module_names: [..] string;
+    // string owned by `all_text`
+    all_source_locations: [..] string;
 
     escape_code_infos: [..] Escape_Code_Info;
 }
@@ -1500,7 +1502,7 @@ Log_Line_Info :: struct {
     line_offset: s64;
     timestamp: Calendar_Time;
     pid: s32 = -1;
-    fiber_id: s16;
+    fiber_id: s16 = -1;
     fiber_name_offset: s16 = -1;
 
     escape_codes_start: s16;
@@ -1509,14 +1511,25 @@ Log_Line_Info :: struct {
     source_id: u8 = SOURCE_ID_UNKNOWN;
     thread_name_offset: u8 = THREAD_NAME_UNKNOWN;
     module_name_offset: u8 = MODULE_NAME_UNKNOWN;
-    log_level: u8;
+    log_level: u8 = 0;
+
+    location_offset: s16 = -1;
 
     source_start: u8;
+    source_count: u8;
     pid_start: u8;
     pid_count: u8;
     thread_name_start: u8;
+    thread_name_count: u8;
     fiber_id_start: u8;
+    fiber_id_count: u8;
     fiber_name_start: u8;
+    fiber_name_count: u8;
+    module_name_start: u8;
+    module_name_count: u8;
+    location_start: u8;
+    location_count: u8;
+    log_level_start: u8;
 }
 
 THREAD_NAME_UNKNOWN :: 0xff;
@@ -1531,6 +1544,19 @@ Log_Info_Piece_Type :: enum {
     MODULE;
     SOURCE_LOCATION;
     LOG_LEVEL;
+}
+
+info_contains :: (info: *Log_Line_Info, piece: Log_Info_Piece_Type) -> bool {
+    if #complete piece == {
+        case .SOURCE;            return info.source_id != SOURCE_ID_UNKNOWN;
+        case .PID;               return info.pid != -1;
+        case .THREAD_NAME;       return info.thread_name_offset != THREAD_NAME_UNKNOWN;
+        case .FIBER_ID;          return info.fiber_id != -1;
+        case .FIBER_NAME;        return info.fiber_name_offset != -1;
+        case .MODULE;            return info.module_name_offset != MODULE_NAME_UNKNOWN;
+        case .SOURCE_LOCATION;   return info.location_offset != -1;
+        case .LOG_LEVEL;         return info.pid != 0;
+    }
 }
 
 parse_log_line :: (buffer: *Log_Text_Buffer, line: string, info: *Log_Line_Info) -> bool {
@@ -1592,6 +1618,7 @@ parse_log_line :: (buffer: *Log_Text_Buffer, line: string, info: *Log_Line_Info)
 
     source_id := add_source(*buffer.all_log_sources, source);
     info.source_start = xx source_start;
+    info.source_count = xx source.count;
     info.source_id = source_id;
 
     cursor = ifx tail then tail.data - line.data else line.count;
@@ -1612,11 +1639,13 @@ parse_log_line :: (buffer: *Log_Text_Buffer, line: string, info: *Log_Line_Info)
 
     // pid
     pid_start := cursor;
+    pid_count := 0;
     pid: s32;
     while cursor < line.count {
         d := line[cursor];
         if !inline is_digit(d) break;
         cursor += 1;
+        pid_count += 1;
         pid = pid * 10 + (d - #char "0");
     }
     if cursor == pid_start return false;
@@ -1627,6 +1656,8 @@ parse_log_line :: (buffer: *Log_Text_Buffer, line: string, info: *Log_Line_Info)
     if rb != #char "]" return false;
 
     info.pid = pid;
+    info.pid_start = xx pid_start;
+    info.pid_count = xx pid_count;
     already_seen := false;
     for table_find_multiple(*buffer.sources_to_pid, source) {
         if it == pid {
@@ -1658,8 +1689,9 @@ parse_log_line :: (buffer: *Log_Text_Buffer, line: string, info: *Log_Line_Info)
 
     // fiber id
     fiber_id: s16;
+    fiber_id_start := cursor;
     while cursor < line.count {
-        fiber_id_start := cursor;
+        fiber_id_start = cursor;
         while (cursor < line.count) && (line[cursor] != #char "/") cursor += 1;
         if cursor == line.count return false;
         assert(line[cursor] == #char "/");
@@ -1675,9 +1707,13 @@ parse_log_line :: (buffer: *Log_Text_Buffer, line: string, info: *Log_Line_Info)
     thread_name := slice(line, thread_name_start, thread_name_end - thread_name_start);
     thread_name_offset := add_thread_name(*buffer.all_thread_names, thread_name);
     info.thread_name_offset = thread_name_offset;
+    info.thread_name_start = xx thread_name_start;
+    info.thread_name_count = xx thread_name.count;
 
     assert(fiber_id != 0);
     info.fiber_id = fiber_id;
+    info.fiber_id_start = xx fiber_id_start;
+    info.fiber_id_count = xx (cursor - fiber_id_start);
 
     assert(line[cursor] == #char "/"); cursor += 1;
 
@@ -1696,9 +1732,22 @@ parse_log_line :: (buffer: *Log_Text_Buffer, line: string, info: *Log_Line_Info)
     fiber_name=, module_name, location := parse_fiber_name_and_the_rest_of_the_garbage(fiber_name);
     fiber_name_offset := add_fiber_name(*buffer.all_fiber_names, fiber_name);
     info.fiber_name_offset = fiber_name_offset;
+    info.fiber_name_start = xx fiber_name_start;
+    info.fiber_name_count = xx fiber_name.count;
 
-    module_name_offset := add_module_name(*buffer.all_module_names, module_name);
-    info.module_name_offset = module_name_offset;
+    if module_name {
+        module_name_offset := add_module_name(*buffer.all_module_names, module_name);
+        info.module_name_offset = module_name_offset;
+        info.module_name_start = xx (module_name.data - line.data);
+        info.module_name_count = xx module_name.count;
+    }
+
+    if location {
+        location_offset := add_module_name(*buffer.all_source_locations, location);
+        info.location_offset = location_offset;
+        info.location_start = xx (location.data - line.data);
+        info.location_count = xx location.count;
+    }
 
     //
     // log level
@@ -1706,9 +1755,11 @@ parse_log_line :: (buffer: *Log_Text_Buffer, line: string, info: *Log_Line_Info)
     if cursor + 2 >= line.count return false;
 
     assert(line[cursor] == #char " "); cursor += 1;
-    log_level := line[cursor]; cursor += 1;
-    assert(line[cursor] == #char ">"); cursor += 1;
+    log_level := line[cursor];
     info.log_level = log_level;
+    info.log_level_start = xx cursor;
+    cursor += 1;
+    assert(line[cursor] == #char ">"); cursor += 1;
 
     // the rest is just the log message
 
@@ -1887,6 +1938,8 @@ Search_Results :: struct {
     matches: [..] Search_Match_Info;
 
     text_buffer: *Log_Text_Buffer;
+
+    flags: enum_flags { STRUCTURED_QUERY; }
 }
 MAX_SEARCH_STRING_LENGTH :: 255;
 
@@ -1894,6 +1947,7 @@ Search_Match_Info :: struct {
     line_index: s32;
     offset_in_line: s16;
     source_id: u8 = SOURCE_ID_UNKNOWN;
+    match_count: u8;
 }
 
 search_match_color :: #run hex_color("f5a511");
@@ -1906,6 +1960,7 @@ update_text_buffer_search_results :: (using buffer: *Log_Text_Buffer, search_str
     search_results.search_string_storage[search_string.count] = 0; // XXX I don't really need this...
     search_results.search_string.data = search_results.search_string_storage.data;
     search_results.search_string.count = search_string.count;
+    search_results.flags = 0;
 
     search_results.text_buffer = buffer;
     array_reset_keeping_memory(*search_results.matches);
@@ -1918,8 +1973,9 @@ update_text_buffer_search_results :: (using buffer: *Log_Text_Buffer, search_str
     search_string_lowercase := to_lower_copy(search_string,, temp);
     for search_string if is_alpha(it) { search_results.case_insensitive = true; break; }
 
-    if do_query {
-
+    if do_query && query.value != "" {
+        search_results.flags |= .STRUCTURED_QUERY;
+        do_query_search(buffer, query, *search_results.matches);
     } else {
         do_text_search(buffer, search_string_lowercase, *search_results.matches, search_results.case_insensitive);
     }
@@ -1948,7 +2004,7 @@ do_text_search :: (buffer: *Log_Text_Buffer, search_string_lowercase: string, ma
 
         if offset >= 0 {
             assert(offset <= S16_MAX, "%", offset);
-            array_add(matches, Search_Match_Info.{ xx line_index, xx offset, source_id });
+            array_add(matches, Search_Match_Info.{xx line_index, xx offset, source_id, xx search_string_lowercase.count});
         }
     }
 }
@@ -1966,25 +2022,48 @@ do_query_search :: (buffer: *Log_Text_Buffer, query: Search_Query, matches: *[..
     }
 
     for * info, line_index: buffer.line_infos {
-        if info.source_id == SOURCE_ID_UNKNOWN continue;
+        if !info_contains(info, query.type) continue;
+        source_id := info.source_id;
 
         offset := -1;
+        count: u8 = 0;
         if #complete query.type == {
             case .SOURCE;
-                find_index_from_left(buffer.all_log_sources[info.source_id], query.value);
+                if !contains(buffer.all_log_sources[info.source_id], query.value) continue;
                 offset = info.source_start;
+                count = info.source_count;
             case .PID;
                 if info.pid != numeric_value continue;
                 offset = info.pid_start;
+                count = info.pid_count;
             case .THREAD_NAME;
+                if !contains(buffer.all_thread_names[info.thread_name_offset], query.value) continue;
+                offset = info.thread_name_start;
+                count = info.thread_name_count;
             case .FIBER_ID;
+                if info.fiber_id != numeric_value continue;
+                offset = info.fiber_id_start;
+                count = info.fiber_id_count;
             case .FIBER_NAME;
+                if !contains(buffer.all_fiber_names[info.fiber_name_offset], query.value) continue;
+                offset = info.fiber_name_start;
+                count = info.fiber_name_count;
             case .MODULE;
+                if !contains(buffer.all_module_names[info.module_name_offset], query.value) continue;
+                offset = info.module_name_start;
+                count = info.module_name_count;
             case .SOURCE_LOCATION;
+                if !contains(buffer.all_source_locations[info.location_offset], query.value) continue;
+                offset = info.location_start;
+                count = info.location_count;
             case .LOG_LEVEL;
+                if info.log_level != query.value[0] continue;
+                offset = info.log_level_start;
+                count = 1;
         }
-
         if offset == -1 continue;
+
+        array_add(matches, Search_Match_Info.{xx line_index, xx offset, source_id, count});
     }
 }
 
@@ -1995,7 +2074,8 @@ parse_search_string :: (text: string) -> Search_Query, ok: bool {
     while (cursor < text.count) && (inline is_space(text[cursor])) cursor += 1;
     if cursor == text.count return .{}, false;
 
-    if cursor != #char "$" return .{}, false;
+    if text[cursor] != #char "$" return .{}, false;
+    cursor += 1;
 
     type_start := cursor;
     while cursor < text.count {
@@ -2041,7 +2121,7 @@ parse_search_string :: (text: string) -> Search_Query, ok: bool {
         // skip until space
         while (cursor < text.count) && (!inline is_space(text[cursor])) cursor += 1;
         if cursor == value_start return .{}, false;
-        result.value = slice(text, value_start, cursor);
+        result.value = slice(text, value_start, cursor - value_start);
     }
 
     return result, true;
@@ -2068,7 +2148,6 @@ parse_string_literal :: (input: string) -> string, ok: bool {
         if c != #char "\\" {
             result[write_cursor] = c; write_cursor += 1; continue;
         }
-        read_cursor += 1;
         c = input[read_cursor]; read_cursor += 1;
 
         if c == #char "\\" || c == #char "\"" {
@@ -4596,13 +4675,67 @@ pretty_assert :: (code: Code, loc := #caller_location) #expand {
 // footer
 //
 
+test_parse_search_string :: () {
+    {
+        line := "$log_level=V";
+        query, ok := parse_search_string(line);
+        assert(ok);
+        assert(query.type == .LOG_LEVEL, "%", query.type);
+        pretty_assert(query.value == "V");
+    }
+    {
+        line := "  $fiber_name=governor_loop  ";
+        query, ok := parse_search_string(line);
+        assert(ok);
+        assert(query.type == .FIBER_NAME, "%", query.type);
+        pretty_assert(query.value == "governor_loop");
+    }
+    {
+        line := "$ module=vshard  ";
+        query, ok := parse_search_string(line);
+        assert(!ok);
+    }
+    {
+        line := "$fiber_name=\"name with spaces\"  ";
+        query, ok := parse_search_string(line);
+        assert(ok);
+        assert(query.type == .FIBER_NAME, "%", query.type);
+        pretty_assert(query.value == "name with spaces");
+    }
+}
+
+test_parse_string_literal :: () {
+    {
+        line := #string END
+"simple"
+        END;
+        out, ok := parse_string_literal(line);
+        assert(ok);
+        assert(out == "simple");
+    }
+    {
+        line := #string END
+"\"a\", \"b\", \"\\\""
+        END;
+        out, ok := parse_string_literal(line);
+        assert(ok);
+        expected := #string END
+"a", "b", "\"
+        END; // " // <- this comment fixes my vim syntax
+        expected = trim_right(expected);
+        assert(out == expected, "'%' '%'", out, expected);
+    }
+}
+
 run_tests :: () {
     t0 := seconds_since_init();
     log("running tests...");
     log("test_search_for_match");          test_search_for_match();
     log("test_array_insert_at");           test_array_insert_at();
     log("test_quick_sort");                test_quick_sort();
-    log("test_parse_date_timestamp");     test_parse_date_timestamp();
+    log("test_parse_date_timestamp");      test_parse_date_timestamp();
+    log("test_parse_search_string");       test_parse_search_string();
+    log("test_parse_string_literal");      test_parse_string_literal();
     elapsed := seconds_since_init() - t0;
     log("\e[32mtests passed!\e[0m elapsed %", fmt(elapsed, 3));
 }
