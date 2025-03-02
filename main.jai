@@ -52,7 +52,21 @@ main :: () {
         Windows.timeBeginPeriod(1);
     }
 
-    window_size = .{ 1300, 780 };
+    window_size = .{ 1300, 1000 };
+
+    #if OS == .WINDOWS {
+        work_area: Windows.RECT;
+        ok := Windows.SystemParametersInfoW(Windows.SPI_GETWORKAREA, 0, *work_area, 0);
+        log("work_area: %", work_area);
+        if ok {
+            work_area_size: Vector2;
+            work_area_size.x = xx (work_area.right - work_area.left);
+            work_area_size.y = xx (work_area.bottom - work_area.top);
+
+            window_size.y = work_area_size.y - 40;
+        }
+    }
+
     window = create_window(xx window_size.x, xx window_size.y, EXE_NAME,
                            background_color_rgb = .[.1, .1, .1],
                            wanted_msaa = WANTED_MSAA);
@@ -210,7 +224,7 @@ update_and_draw_frame :: () -> bool {
         left   = absolute_left + 40;
         left = max(left, xx (main_font.line_height * 3));
         top    = absolute_top;
-        width  = xx (window_size.x - 40 - 100);
+        width  = scroll_bar_rect.left - left;
         height = xx window_size.y;
     }
     total_line_count := text_buffer_line_infos.count;
