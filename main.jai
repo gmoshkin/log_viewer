@@ -52,7 +52,7 @@ main :: () {
         Windows.timeBeginPeriod(1);
     }
 
-    window_size = .{ 1300, 1000 };
+    window_size = .{ 1300, 780 };
     window = create_window(xx window_size.x, xx window_size.y, EXE_NAME,
                            background_color_rgb = .[.1, .1, .1],
                            wanted_msaa = WANTED_MSAA);
@@ -328,6 +328,11 @@ update_and_draw_frame :: () -> bool {
             target_scroll_rows = clamp(target_scroll_rows, -text_pane_row_count / 2.0, total_line_count - text_pane_row_count / 2.0);
         }
 
+        else if the_popup_text_input.flags & .OPEN {
+            handled := popup_text_input_handle_input_event(*the_popup_text_input, it);
+            if handled continue;
+        }
+
         else if text_search_ui_open {
             handled := text_search_ui_handle_input_event(it);
             if handled continue;
@@ -582,7 +587,7 @@ update_and_draw_frame :: () -> bool {
 
                 y_line := parent_top - (row_index + 1) * H;
                 y := y_line + pad;
-                draw_axis_aligned_rectangle(xx x, xx y, xx w, xx h, color);
+                draw_axis_aligned_rectangle(xx x, xx y, xx w, xx h, it.color);
             }
         }
     }
@@ -705,6 +710,10 @@ update_and_draw_frame :: () -> bool {
     // draw the popup menu
     if the_popup_menu.flags & .OPEN {
         do_popup_menu(*the_popup_menu, mouse, handle_click=false, do_draw=true);
+    }
+
+    if the_popup_text_input.flags & .OPEN {
+        draw_popup_text_input(*the_popup_text_input, handle_click=false);
     }
 
     // debuggin pane
@@ -1610,7 +1619,7 @@ detect_cycle :: (merges: [] Merge_Info, from: u8, to: u8) -> found_cycle: bool {
 }
 
 
-log_line_popup_menu_callback :: (menu: *Popup_Menu, event: Popup_Menu_Event) {
+log_line_popup_menu_callback :: (menu: *Popup_Menu, event: Popup_Menu.Event) {
     assert(menu.callback_data.type == type_info(u8));
     this_source_id := cast(*u8, menu.callback_data.value_pointer).*;
 
@@ -2000,12 +2009,17 @@ draw_text_search_ui :: (rect: Rectangle, font: My_Dynamic_Font, handle_click: bo
 // anchor buttons
 //
 
-anchor_button_active_color  := #run hex_color("4050d0");
+anchor_button_active_color  :: #run hex_color("4050d0");
 anchor_button_hover_color   := #run hex_color("404040");
 anchor_line_highlight_color := #run hex_color("404040");
 explicit_anchors: [..] Anchor;
 Anchor :: struct {
     line_index: s64;
+    color := anchor_button_active_color;
+    text := "";
+}
+make_anchor :: inline (line_index: int, color := anchor_button_active_color, text := "") -> Anchor {
+    return .{line_index, color, text};
 }
 hovered_anchor_button_line: s64 = -1;
 active_anchor_segment: [2] Anchor;
@@ -2019,19 +2033,26 @@ anchor_button_toggle :: (line_index: int) {
 
     // FIXME: just use procedures which preserve order
     if anchor_index != -1 {
+        free(explicit_anchors[anchor_index].text);
         array_unordered_remove_by_index(*explicit_anchors, anchor_index);
     } else {
-        array_add(*explicit_anchors, .{line_index});
+        array_add(*explicit_anchors, make_anchor(line_index));
     }
     quick_sort(explicit_anchors, (l, r) => l.line_index - r.line_index);
 
     request_redraw("anchor button toggle");
 }
 
+anchor_button_add :: (line_index: int) {
+    for explicit_anchors if it.line_index == line_index return;
+    array_add(*explicit_anchors, make_anchor(line_index));
+    quick_sort(explicit_anchors, (l, r) => l.line_index - r.line_index);
+}
+
 anchor_button_open_popup_menu :: (line_index: int, mouse: Vector2) {
-    anchor := Anchor.{-1};
-    anchor_above := Anchor.{-1};   // I'm not stupid, this line is above
-    anchor_bellow := Anchor.{-1};  // this one on the monitor
+    anchor := make_anchor(-1);
+    anchor_above := make_anchor(-1);   // I'm not stupid, this line is above
+    anchor_bellow := make_anchor(-1);  // this one on the monitor
     for explicit_anchors {
         if it.line_index < line_index {
             anchor_above = it;
@@ -2049,6 +2070,9 @@ anchor_button_open_popup_menu :: (line_index: int, mouse: Vector2) {
     active := (anchor.line_index != -1);
     if active then popup_menu_push_item(menu, "Remove anchor", id=xx TOGGLE);
               else popup_menu_push_item(menu, "Add anchor", id=xx TOGGLE);
+
+    // FIXME if no anchor it should say "set text" otherwise it should say "edit text"
+    popup_menu_push_item(menu, "Set/Edit text", id=xx EDIT_TEXT);
 
     popup_menu_push_item(menu, "Delete 1 line", id=xx DELETE_1_LINE);
 
@@ -2070,12 +2094,13 @@ Anchor_Button_Popup_Menu_Callback_Data :: struct {
 
 Anchor_Button_Popup_Menu_Item_Id :: enum {
     TOGGLE;
+    EDIT_TEXT;
     DELETE_1_LINE;
     DELETE_LINES_UP;
     DELETE_LINES_DOWN;
 }
 
-anchor_button_popup_menu_callback :: (menu: *Popup_Menu, event: Popup_Menu_Event) {
+anchor_button_popup_menu_callback :: (menu: *Popup_Menu, event: Popup_Menu.Event) {
     assert(menu.callback_data.type == type_info(Anchor_Button_Popup_Menu_Callback_Data));
     data := cast(*Anchor_Button_Popup_Menu_Callback_Data) menu.callback_data.value_pointer;
 
@@ -2088,17 +2113,29 @@ anchor_button_popup_menu_callback :: (menu: *Popup_Menu, event: Popup_Menu_Event
             if event == .CLICK
                 anchor_button_toggle(data.line_index);
 
+        case .EDIT_TEXT;
+            if event == .CLICK {
+                anchor_button_add(data.line_index);
+                x := right(text_pane_rect);
+                // FIXME: correct coordinates
+                y := 500;
+                // FIXME leak
+                callback_data := New(int);
+                callback_data.* = data.line_index;
+                open_the_popup_text_input(.{xx x, xx y}, .LEFT, anchor_button_text_update_callback, callback_data);
+            }
+
         case .DELETE_1_LINE;
-            first = Anchor.{data.line_index};
-            last = Anchor.{data.line_index};
+            first = make_anchor(data.line_index);
+            last = make_anchor(data.line_index);
 
         case .DELETE_LINES_UP;
             first = data.anchor_above;
             if first.line_index == -1 then first.line_index = 0;
-            last = Anchor.{data.line_index};
+            last = make_anchor(data.line_index);
 
         case .DELETE_LINES_DOWN;
-            first = Anchor.{data.line_index};
+            first = make_anchor(data.line_index);
             last = data.anchor_bellow;
             if last.line_index == -1 then last.line_index = text_buffer_line_infos.count - 1;
     }
@@ -2123,15 +2160,15 @@ Popup_Menu :: struct {
     hovered_item: s16 = -1;
     flags: enum_flags { OPEN; HAS_MOUSE_FOCUS; };
 
-    callback: Popup_Menu_Callback;
+    callback: Callback;
     callback_data: Any;
 
     pool: Pool;
     allocator: Allocator;
-}
 
-Popup_Menu_Callback :: #type (menu: *Popup_Menu, event: Popup_Menu_Event);
-Popup_Menu_Event :: enum { CLICK; HOVER; }
+    Callback :: #type (menu: *Popup_Menu, event: Event);
+    Event :: enum { CLICK; HOVER; }
+}
 
 the_popup_menu: Popup_Menu;
 
@@ -2165,11 +2202,11 @@ has_focus :: (menu: *Popup_Menu) -> bool #expand {
     return menu.flags & .HAS_MOUSE_FOCUS != 0;
 }
 
-open_the_popup_menu :: inline (at: Vector2, callback: Popup_Menu_Callback) -> *Popup_Menu {
+open_the_popup_menu :: inline (at: Vector2, callback: Popup_Menu.Callback) -> *Popup_Menu {
     return open_the_popup_menu(at, callback, null);
 }
 
-open_the_popup_menu :: (at: Vector2, callback: Popup_Menu_Callback, callback_data: $T) -> *Popup_Menu {
+open_the_popup_menu :: (at: Vector2, callback: Popup_Menu.Callback, callback_data: $T) -> *Popup_Menu {
     menu := *the_popup_menu;
     array_reset(*menu.items);
     reset(*menu.pool);
@@ -2388,6 +2425,108 @@ draw_icon :: (x: float, y: float, icon: Icon_Info) {
             draw_triangle(p0, p1, p2, icon.color);
 
     }
+}
+
+Popup_Text_Input :: struct {
+    #as using,except(flags) text_input: Text_Input_State;
+
+    position: Vector2;
+    minimum_width: float;
+    height: float;
+    direction: Adjust_Direction;
+    flags: enum_flags { OPEN; HAS_MOUSE_FOCUS; };
+
+    callback: Callback;
+    callback_data: Any;
+
+    Event :: enum { CHANGE; SUBMIT; }
+    Callback :: #type (state: *Popup_Text_Input, event: Popup_Text_Input.Event);
+}
+the_popup_text_input := Popup_Text_Input.{
+    text_input = Text_Input_State.{ max_length = 256 },
+    minimum_width = 100.0,
+    height = 20,
+};
+
+Adjust_Direction :: enum { LEFT; RIGHT; }
+
+rectangle_of :: (using state: *Popup_Text_Input) -> Rectangle {
+    rect: Rectangle;
+    rect.left = xx position.x;
+    rect.width = xx minimum_width;
+    rect.top = xx (position.y + height);
+    rect.height = xx height;
+    if direction == .LEFT then rect.left -= rect.width;
+    return rect;
+}
+
+open_the_popup_text_input :: inline (at: Vector2, direction: Adjust_Direction, callback: Popup_Text_Input.Callback) -> *Popup_Text_Input {
+    return open_the_popup_text_input(at, direction, callback, null);
+}
+
+open_the_popup_text_input :: (at: Vector2, direction: Adjust_Direction, callback: Popup_Text_Input.Callback, callback_data: *$T) -> *Popup_Text_Input {
+    menu := *the_popup_text_input;
+
+    menu.callback = callback;
+    menu.callback_data = callback_data;
+
+    menu.direction = direction;
+    menu.position = at;
+    menu.flags |= .OPEN;
+
+    return menu;
+}
+
+anchor_button_text_update_callback :: (state: *Popup_Text_Input, event: Popup_Text_Input.Event) {
+    line_index := downcast(*int, state.callback_data.value_pointer).*;
+    log("%: '%' %", event, cast(string) state.buffer, line_index);
+}
+
+downcast :: inline ($T: Type, any: Any) -> *T {
+    builder: String_Builder;
+    builder.allocator = temp;
+    print_type_to_builder(*builder, any.type);
+    assert(any.type == type_info(*T), "%", builder_to_string(*builder,, temp));
+    return cast(*T) any.value_pointer;
+}
+
+popup_text_input_handle_input_event :: (using state: *Popup_Text_Input, event: Input.Event) -> handled: bool {
+    status := text_input_handle_event(*state.text_input, event);
+    if !status return false;
+
+    if status & .TEXT_CHANGED {
+        state.callback(state, .CHANGE);
+    }
+
+    if status & .ENTER_HIT {
+        state.callback(state, .SUBMIT);
+        state.flags &= ~.OPEN;
+    }
+
+    if status & .CLOSED {
+        state.flags &= ~.OPEN;
+    }
+
+    request_redraw("popup text input");
+
+    return xx status;
+}
+
+draw_popup_text_input :: (using state: *Popup_Text_Input, handle_click: bool) -> click_handled: bool {
+    font := ui_font;
+    rect := rectangle_of(state);
+    draw_axis_aligned_rectangle(rect, text_search_ui_background_color);
+    draw_hollow_axis_aligned_rectangle(xx rect.left, xx bottom(rect), xx rect.width, xx rect.height,
+                                       border = text_search_ui_border_width, text_search_ui_border_color);
+
+    border_width := text_search_ui_border_width;
+    text_x_tweak := border_width * 2 + 2;
+    text_y_tweak := border_width * 2 + 2;
+    text_x := rect.left + text_x_tweak;
+    text_y := bottom(rect) + text_y_tweak;
+
+    click_handled := draw_text_input(*state.text_input, rect, text_x, text_y, font.regular, text_search_ui_text_color, handle_click);
+    return click_handled;
 }
 
 Text_Input_State :: struct {
