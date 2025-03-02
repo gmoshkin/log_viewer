@@ -154,7 +154,7 @@ scroll_bar_rect: Rectangle;
 scroll_bar_pad := 1;
 scroll_bar_slider_color := #run hex_color("d0d0d0");
 scroll_bar_anchor_min_width := 1.7;
-scroll_bar_effective_slider_color := #run hex_color("b0b0b0");
+scroll_bar_effective_slider_color := #run hex_color("808080");
 scroll_bar_anchor_hover_color := #run hex_color("e0e0e0");
 
 hovered_scroll_bar_anchor_kind: enum { EXPLICIT; SEARCH_MATCH; };
@@ -741,7 +741,7 @@ update_and_draw_frame :: () -> bool {
             x_pad := 1;
             h := scroll_bar_slider_effective_height;
             y := rect.top - scroll_y - h;
-            draw_axis_aligned_rectangle(xx (x + x_pad - 1), y, xx (w - 2 * x_pad), xx h, color);
+            draw_hollow_axis_aligned_rectangle(xx (x + x_pad - 1), y, xx (w - 2 * x_pad), xx h, 2, color);
         }
 
         if text_search_ui_open {
