@@ -127,8 +127,9 @@ request_redraw :: (reason: string, loc := #caller_location) {
               else array_add(*redraw_reasons, tprint("at %", loc));
 }
 
+main_font_default_pixel_height :: 14;
 main_font := My_Dynamic_Font.{
-    pixel_height = 14,
+    pixel_height = main_font_default_pixel_height,
 };
 
 ui_font := My_Dynamic_Font.{
@@ -335,17 +336,24 @@ update_and_draw_frame :: () -> bool {
             }
         }
 
+        else if it.key_code == #char "0" && it.ctrl_pressed && !it.shift_pressed && !it.alt_pressed {
+            main_font.pixel_height = main_font_default_pixel_height;
+            main_font.pixel_height = max(main_font.pixel_height, 1);
+        }
+
         // modules/Input doesn't set it.ctrl_pressed for MOUSE_WHEEL :(
         else if it.type == .MOUSE_WHEEL && modifiers == .SHIFT && !draggin_scroll_bar {
             ofs := it.wheel_delta / cast(float) it.typical_wheel_delta;
-
-            target_scroll_columns += -ofs * 8;
+            pane_width_in_characters := text_pane_rect.width / main_font.mono_width;
+            target_scroll_columns += -ofs * (pane_width_in_characters / 16);
             target_scroll_columns = max(target_scroll_columns, 0);
             request_redraw(tprint("scroll at %", #line));
         }
 
         else if it.type == .MOUSE_WHEEL && !modifiers && !draggin_scroll_bar {
-            target_scroll_rows += -6 * it.wheel_delta / cast(float) it.typical_wheel_delta;
+            ofs := it.wheel_delta / cast(float) it.typical_wheel_delta;
+            pane_height_in_lines := text_pane_rect.height / main_font.line_height;
+            target_scroll_rows += -ofs * (pane_height_in_lines / 8);
             target_scroll_rows = clamp(target_scroll_rows, -text_pane_row_count / 2.0, total_line_count - text_pane_row_count / 2.0);
             request_redraw(tprint("scroll at %", #line));
         }
@@ -794,7 +802,6 @@ update_and_draw_frame :: () -> bool {
         if global_time_range_max != APOLLO_TIME_INVALID then print_time_for_log(*builder, to_calendar(global_time_range_max));
                                                         else print(*builder, "?");
         print(*builder, "\n");
-        print(*builder, "click_streak: %\n", text_search_input.click_streak);
         for redraw_reasons print(*builder, "%\n", it);
 
         pane_text := builder_to_string(*builder,, temp);
