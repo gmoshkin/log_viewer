@@ -274,6 +274,10 @@ update_and_draw_frame :: () -> bool {
             request_redraw("mouse left click");
             mouse_at_click = mouse;
 
+            if the_popup_text_input.flags & .OPEN && !axis_aligned_rectangle_contains(rectangle_of(*the_popup_text_input), mouse) {
+                close_popup_text_input(*the_popup_text_input);
+            }
+
             // if text_search_ui_active && !axis_aligned_rectangle_contains(text_search_ui_rect, mouse) {
             //     text_search_ui_active = false;
             // }
@@ -282,9 +286,19 @@ update_and_draw_frame :: () -> bool {
         } else if it.key_code == .MOUSE_BUTTON_RIGHT && it.key_pressed {
             request_redraw("mouse right click");
             mouse_at_click = mouse;
+
+            if the_popup_text_input.flags & .OPEN && !axis_aligned_rectangle_contains(rectangle_of(*the_popup_text_input), mouse) {
+                close_popup_text_input(*the_popup_text_input);
+            }
+
         } else if it.key_code == .MOUSE_BUTTON_MIDDLE && it.key_pressed {
             request_redraw("mouse middle click");
             mouse_at_click = mouse;
+
+            if the_popup_text_input.flags & .OPEN && !axis_aligned_rectangle_contains(rectangle_of(*the_popup_text_input), mouse) {
+                close_popup_text_input(*the_popup_text_input);
+            }
+
         }
 
         // modules/Input doesn't set it.ctrl_pressed for MOUSE_WHEEL :(
@@ -667,8 +681,8 @@ update_and_draw_frame :: () -> bool {
             explicit_anchor_index := do_scroll_bar_anchors(scroll_bar_rect, explicit_anchors, anchor_button_active_color, .DRAW, mouse_in_rect, t=15);
             if !mouse_over_slider {
                 if explicit_anchor_index != -1 {
-                    line_index := explicit_anchors[explicit_anchor_index].line_index;
-                    draw_single_scroll_bar_anchor(scroll_bar_rect, line_index, anchor_button_active_color, hover=true, t=15);
+                    anchor := *explicit_anchors[explicit_anchor_index];
+                    draw_single_scroll_bar_anchor(scroll_bar_rect, anchor.line_index, anchor.color, hover=true, t=15);
                 } else if search_match_index != -1 {
                     match := search_results.matches[search_match_index];
                     color := get_log_source_color(match.source_id);
@@ -707,13 +721,14 @@ update_and_draw_frame :: () -> bool {
         }
     }
 
+    // draw the popup text input
+    if the_popup_text_input.flags & .OPEN {
+        draw_popup_text_input(*the_popup_text_input, handle_click=false);
+    }
+
     // draw the popup menu
     if the_popup_menu.flags & .OPEN {
         do_popup_menu(*the_popup_menu, mouse, handle_click=false, do_draw=true);
-    }
-
-    if the_popup_text_input.flags & .OPEN {
-        draw_popup_text_input(*the_popup_text_input, handle_click=false);
     }
 
     // debuggin pane
@@ -800,6 +815,7 @@ do_scroll_bar_anchors :: (parent_rect: Rectangle, anchors: [] $T, color: Vector4
         #if #complete mode == {
         case .DRAW;
             #if T == Search_Match_Info then color_ = get_log_source_color(it.source_id);
+            else #if T == Anchor then color_ = it.color;
             inline draw_scroll_bar_anchor(x, y, w, h, t, color_, false);
             if hover then array_add(*hover_indexes, it_index);
 
@@ -2016,9 +2032,10 @@ Anchor :: struct {
     line_index: s64;
     color := anchor_button_active_color;
     text := "";
+    flags: enum_flags { TEXT_VISIBLE; }
 }
 make_anchor :: inline (line_index: int, color := anchor_button_active_color, text := "") -> Anchor {
-    return .{line_index, color, text};
+    return .{line_index, color, text, 0};
 }
 hovered_anchor_button_line: s64 = -1;
 active_anchor_segment: [2] Anchor;
@@ -2076,6 +2093,9 @@ anchor_button_open_popup_menu :: (line_index: int, mouse: Vector2) {
     // FIXME if no anchor it should say "set text" otherwise it should say "edit text"
     popup_menu_push_item(menu, "Set/Edit text", id=xx EDIT_TEXT);
 
+    // FIXME text based on current state
+    popup_menu_push_item(menu, "Toggle text visibility", id=xx TOGGLE_TEXT_VISIBILITY);
+
     popup_menu_push_item(menu, "Delete 1 line", id=xx DELETE_1_LINE);
 
     if anchor_above.line_index != -1 then popup_menu_push_item(menu, "Delete lines up (to anchor)", id=xx DELETE_LINES_UP);
@@ -2097,6 +2117,7 @@ Anchor_Button_Popup_Menu_Callback_Data :: struct {
 Anchor_Button_Popup_Menu_Item_Id :: enum {
     TOGGLE;
     EDIT_TEXT;
+    TOGGLE_TEXT_VISIBILITY;
     DELETE_1_LINE;
     DELETE_LINES_UP;
     DELETE_LINES_DOWN;
@@ -2118,14 +2139,27 @@ anchor_button_popup_menu_callback :: (menu: *Popup_Menu, event: Popup_Menu.Event
         case .EDIT_TEXT;
             if event == .CLICK {
                 anchor_index := get_or_add_anchor_button(data.line_index);
-                x := right(text_pane_rect);
-                // FIXME: correct coordinates
-                y := 500;
-                // FIXME leak
+                anchor := *explicit_anchors[anchor_index];
+                source_id := text_buffer_line_infos[anchor.line_index].source_id;
+                anchor.color = get_log_source_color(source_id);
+                anchor.flags |= .TEXT_VISIBLE;
+                x := left(scroll_bar_rect) - 16.0;
+                total_line_count := text_buffer_line_infos.count;
+                dy := height(scroll_bar_rect) / cast(float) total_line_count;
+                y := top(scroll_bar_rect) - data.line_index * dy - calculate_height(*the_popup_text_input) / 2.0;
+                // @LAME FIXME use a memory pool instead of New/free
                 callback_data := New(int);
                 callback_data.* = data.line_index;
                 menu := open_the_popup_text_input(.{xx x, xx y}, .LEFT, anchor_button_text_update_callback, callback_data);
-                set_text_buffer(menu, explicit_anchors[anchor_index].text);
+                set_text_buffer(menu, anchor.text);
+            }
+
+        case .TOGGLE_TEXT_VISIBILITY;
+            if event == .CLICK {
+                anchor_index := get_anchor_at_line_index(data.line_index);
+                anchor := *explicit_anchors[anchor_index];
+                if anchor.flags & .TEXT_VISIBLE then anchor.flags &= ~.TEXT_VISIBLE;
+                                                else anchor.flags |=  .TEXT_VISIBLE;
             }
 
         case .DELETE_1_LINE;
@@ -2439,6 +2473,8 @@ Popup_Text_Input :: struct {
     direction: Adjust_Direction;
     flags: enum_flags { OPEN; HAS_MOUSE_FOCUS; };
 
+    border_width :: 1.0;
+
     callback: Callback;
     callback_data: Any;
 
@@ -2448,7 +2484,6 @@ Popup_Text_Input :: struct {
 the_popup_text_input := Popup_Text_Input.{
     text_input = Text_Input_State.{ max_length = 256 },
     minimum_width = 100.0,
-    height = 20,
 };
 
 Adjust_Direction :: enum { LEFT; RIGHT; }
@@ -2463,6 +2498,10 @@ rectangle_of :: (using state: *Popup_Text_Input) -> Rectangle {
     return rect;
 }
 
+calculate_height :: (using state: *Popup_Text_Input) -> float {
+    return 2 * state.border_width + xx (ui_font.character_height - ui_font.typical_descender);
+}
+
 open_the_popup_text_input :: inline (at: Vector2, direction: Adjust_Direction, callback: Popup_Text_Input.Callback) -> *Popup_Text_Input {
     return open_the_popup_text_input(at, direction, callback, null);
 }
@@ -2474,6 +2513,7 @@ open_the_popup_text_input :: (at: Vector2, direction: Adjust_Direction, callback
     state.callback_data.value_pointer = callback_data;
     state.callback_data.type = type_info(T);
 
+    state.height = calculate_height(state);
     state.direction = direction;
     state.position = at;
     state.flags |= .OPEN;
@@ -2538,9 +2578,8 @@ draw_popup_text_input :: (using state: *Popup_Text_Input, handle_click: bool) ->
     draw_hollow_axis_aligned_rectangle(xx rect.left, xx bottom(rect), xx rect.width, xx rect.height,
                                        border = text_search_ui_border_width, text_search_ui_border_color);
 
-    border_width := text_search_ui_border_width;
-    text_x_tweak := border_width * 2 + 2;
-    text_y_tweak := border_width * 2 + 2;
+    text_x_tweak := border_width + 3;
+    text_y_tweak := border_width + 4;
     text_x := rect.left + text_x_tweak;
     text_y := bottom(rect) + text_y_tweak;
 
@@ -2850,7 +2889,7 @@ draw_text_input :: (state: *Text_Input_State, rect: Rectangle, x: float, y: floa
 
     cursor_y_tweak := -2.0;
     cursor_y := y + cursor_y_tweak;
-    cursor_h := (font.character_height - font.typical_descender);
+    cursor_h := font.character_height;
 
     Simp.prepare_text(font, xx state.buffer);
 
@@ -2951,7 +2990,7 @@ cursor_position_from_temporary_glyphs :: (rect: Rectangle, temporary_glyphs: [] 
 // Axis aligned rectangle
 Rectangle :: struct {
     left: s32;
-    // TODO: this should be bottom probably...
+    // TODO: this should be bottom probably... maybe not though
     top: s32;
     width: s32;
     height: s32;
