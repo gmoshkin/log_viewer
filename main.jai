@@ -1006,8 +1006,7 @@ draw_the_text_pane :: (rect: Rectangle) {
                 }
             }
 
-            anchored := false;
-            for explicit_anchors if it.line_index == line_index { anchored = true; break; }
+            anchored := get_anchor_at_line_index(line_index) != -1;
             if anchored {
                 w := rect.width;
                 h := 2;
@@ -2024,12 +2023,13 @@ make_anchor :: inline (line_index: int, color := anchor_button_active_color, tex
 hovered_anchor_button_line: s64 = -1;
 active_anchor_segment: [2] Anchor;
 
+get_anchor_at_line_index :: (line_index: int) -> anchor_index: int {
+    for explicit_anchors if it.line_index == line_index return it_index;
+    return -1;
+}
+
 anchor_button_toggle :: (line_index: int) {
-    anchor_index := -1;
-    for explicit_anchors if it.line_index == line_index {
-        anchor_index = it_index;
-        break;
-    }
+    anchor_index := get_anchor_at_line_index(line_index);
 
     // FIXME: just use procedures which preserve order
     if anchor_index != -1 {
@@ -2043,10 +2043,12 @@ anchor_button_toggle :: (line_index: int) {
     request_redraw("anchor button toggle");
 }
 
-anchor_button_add :: (line_index: int) {
-    for explicit_anchors if it.line_index == line_index return;
+get_or_add_anchor_button :: (line_index: int) -> anchor_index: int {
+    anchor_index := get_anchor_at_line_index(line_index);
+    if anchor_index != -1 return anchor_index;
     array_add(*explicit_anchors, make_anchor(line_index));
     quick_sort(explicit_anchors, (l, r) => l.line_index - r.line_index);
+    return get_anchor_at_line_index(line_index);
 }
 
 anchor_button_open_popup_menu :: (line_index: int, mouse: Vector2) {
@@ -2115,14 +2117,15 @@ anchor_button_popup_menu_callback :: (menu: *Popup_Menu, event: Popup_Menu.Event
 
         case .EDIT_TEXT;
             if event == .CLICK {
-                anchor_button_add(data.line_index);
+                anchor_index := get_or_add_anchor_button(data.line_index);
                 x := right(text_pane_rect);
                 // FIXME: correct coordinates
                 y := 500;
                 // FIXME leak
                 callback_data := New(int);
                 callback_data.* = data.line_index;
-                open_the_popup_text_input(.{xx x, xx y}, .LEFT, anchor_button_text_update_callback, callback_data);
+                menu := open_the_popup_text_input(.{xx x, xx y}, .LEFT, anchor_button_text_update_callback, callback_data);
+                set_text_buffer(menu, explicit_anchors[anchor_index].text);
             }
 
         case .DELETE_1_LINE;
@@ -2465,28 +2468,44 @@ open_the_popup_text_input :: inline (at: Vector2, direction: Adjust_Direction, c
 }
 
 open_the_popup_text_input :: (at: Vector2, direction: Adjust_Direction, callback: Popup_Text_Input.Callback, callback_data: *$T) -> *Popup_Text_Input {
-    menu := *the_popup_text_input;
+    state := *the_popup_text_input;
 
-    menu.callback = callback;
-    menu.callback_data = callback_data;
+    state.callback = callback;
+    state.callback_data.value_pointer = callback_data;
+    state.callback_data.type = type_info(T);
 
-    menu.direction = direction;
-    menu.position = at;
-    menu.flags |= .OPEN;
+    state.direction = direction;
+    state.position = at;
+    state.flags |= .OPEN;
 
-    return menu;
+    return state;
+}
+
+close_popup_text_input :: (state: *Popup_Text_Input) {
+    state.flags &= ~.OPEN;
+    free(state.callback_data.value_pointer);
+    reset_text_input(*state.text_input);
+}
+
+set_text_buffer :: (state: *Popup_Text_Input, text: string) {
+    array_reset_keeping_memory(*state.buffer);
+    array_add(*state.buffer, .. cast([] u8) text);
+    state.cursor = state.buffer.count;
 }
 
 anchor_button_text_update_callback :: (state: *Popup_Text_Input, event: Popup_Text_Input.Event) {
-    line_index := downcast(*int, state.callback_data.value_pointer).*;
-    log("%: '%' %", event, cast(string) state.buffer, line_index);
+    line_index := downcast(int, state.callback_data).*;
+    if event == .SUBMIT {
+        anchor_index := get_anchor_at_line_index(line_index);
+        assert(anchor_index != -1);
+        anchor := *explicit_anchors[anchor_index];
+        free(anchor.text);
+        anchor.text = copy_string(xx state.buffer);
+    }
 }
 
 downcast :: inline ($T: Type, any: Any) -> *T {
-    builder: String_Builder;
-    builder.allocator = temp;
-    print_type_to_builder(*builder, any.type);
-    assert(any.type == type_info(*T), "%", builder_to_string(*builder,, temp));
+    assert(any.type == type_info(T), "%", any.type);
     return cast(*T) any.value_pointer;
 }
 
@@ -2500,11 +2519,11 @@ popup_text_input_handle_input_event :: (using state: *Popup_Text_Input, event: I
 
     if status & .ENTER_HIT {
         state.callback(state, .SUBMIT);
-        state.flags &= ~.OPEN;
+        close_popup_text_input(state);
     }
 
     if status & .CLOSED {
-        state.flags &= ~.OPEN;
+        close_popup_text_input(state);
     }
 
     request_redraw("popup text input");
@@ -2554,6 +2573,14 @@ Text_Input_Status :: enum_flags {
     ENTER_HIT;
     SHIFT_PRESSED;
     CLOSED;
+}
+
+reset_text_input :: (state: *Text_Input_State) {
+    array_reset_keeping_memory(*state.buffer);
+    state.cursor = 0;
+    state.selection_start = 0;
+    state.flags = 0;
+    state.click_streak = 0;
 }
 
 text_input_handle_event :: (state: *Text_Input_State, event: Input.Event) -> result: Text_Input_Status {
@@ -3468,6 +3495,9 @@ my_struct_printer :: (builder: *String_Builder, any: Any, struct_printer_data: *
         return true;
     } else if any.type == type_info(Small_Escape_Sequence) {
         print(builder, cast(*Small_Escape_Sequence, any.value_pointer).*);
+        return true;
+    } else if any.type == type_info(*Type_Info) {
+        print_type_to_builder(builder, cast(**Type_Info, any.value_pointer).*);
         return true;
     }
 
