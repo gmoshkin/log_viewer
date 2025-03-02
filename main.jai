@@ -83,7 +83,7 @@ main :: () {
     the_popup_menu.allocator = .{pool_allocator_proc, *the_popup_menu.pool};
 
     Profile();
-    load_text_buffer_data(input_from_clipboard);
+    load_text_buffer_data(*the_text_buffer, input_from_clipboard);
     Profile();
 
     reload_main_font();
@@ -160,6 +160,21 @@ scroll_bar_anchor_hover_color := #run hex_color("e0e0e0");
 hovered_scroll_bar_anchor_kind: enum { EXPLICIT; SEARCH_MATCH; };
 hovered_scroll_bar_anchor_index: s64 = -1;
 
+color_red :: #run hex_color("db0011");
+color_green :: #run hex_color("00c52c");
+color_blue :: #run hex_color("0069cb");
+color_coral :: #run hex_color("ff8080");
+color_yellow :: #run hex_color("ffdf00");
+color_cyan :: #run hex_color("208c73");
+color_magenta :: #run hex_color("ff00bb");
+color_orange :: #run hex_color("ff6b00");
+color_baby_blue :: #run hex_color("6bc8f2");
+color_purple :: #run hex_color("a000ff");
+color_white :: #run hex_color("ffffff");
+color_brown :: #run hex_color("973f00");
+color_black :: #run hex_color("000000");
+color_gray :: #run hex_color("707070");
+
 //
 // main update and draw proc
 //
@@ -227,7 +242,7 @@ update_and_draw_frame :: () -> bool {
         width  = scroll_bar_rect.left - left;
         height = xx window_size.y;
     }
-    total_line_count := text_buffer_line_infos.count;
+    total_line_count := the_text_buffer.line_infos.count;
     text_pane_row_count := text_pane_rect.height / main_font.line_height;
 
     // XXX what's the english name for поле?
@@ -388,7 +403,7 @@ update_and_draw_frame :: () -> bool {
             target_scroll_rows = total_line_count - text_pane_row_count / 2.0;
         } else if it.key_pressed && it.ctrl_pressed && it.shift_pressed && it.key_code == #char "V" {
             Profile();
-            load_text_buffer_data(from_clipboard=true);
+            load_text_buffer_data(*the_text_buffer, from_clipboard=true);
             Profile();
         }
     }
@@ -538,7 +553,7 @@ update_and_draw_frame :: () -> bool {
     // draw text pane
     {
         profile_t0 = seconds_since_init();
-        draw_the_text_pane(text_pane_rect);
+        draw_the_text_pane(*the_text_buffer, text_pane_rect);
         Profile();
 
         // draw the side bars to fix the ugly text bleed over
@@ -655,12 +670,12 @@ update_and_draw_frame :: () -> bool {
         draw_axis_aligned_rectangle(xx x, y, xx w, h, color);
 
         // draw log ranges of same source
-        for i: 0..log_ranges_of_source.count-2 {
-            range := log_ranges_of_source[i];
+        for i: 0..the_text_buffer.log_ranges_of_source.count-2 {
+            range := the_text_buffer.log_ranges_of_source[i];
             if range.source_id == SOURCE_ID_UNKNOWN continue;
 
             y_top := rect.top - range.start_index / cast(float) lines_per_scroll_bar_pixel;
-            y_bottom := rect.top - log_ranges_of_source[i + 1].start_index / cast(float) lines_per_scroll_bar_pixel;
+            y_bottom := rect.top - the_text_buffer.log_ranges_of_source[i + 1].start_index / cast(float) lines_per_scroll_bar_pixel;
 
             color := get_log_source_color(range.source_id);
             draw_axis_aligned_rectangle(xx x, y_bottom, xx w, y_top - y_bottom, color);
@@ -756,8 +771,7 @@ update_and_draw_frame :: () -> bool {
         elapsed := seconds_since_init() - t0;
         print(*builder, "% %\n", frame_counter, fmt(elapsed, 6));
         print(*builder, "scroll: %, %\n", fmt(scroll_columns, 1), fmt(scroll_rows, 1));
-        print(*builder, "num sources: %\n", text_buffer_all_log_sources.count);
-        // print(*builder, "num ranges: %\n", log_ranges_of_source.count);
+        print(*builder, "num sources: %\n", the_text_buffer.all_log_sources.count);
         // if text_search_ui_open print(*builder, "cursor: %\n", text_input_cursor);
         if text_search_ui_open print(*builder, "search matches: %\n", search_results.matches.count);
         if hovered_scroll_bar_anchor_index != -1 then print(*builder, "% %\n", hovered_scroll_bar_anchor_kind, hovered_scroll_bar_anchor_index);
@@ -818,7 +832,7 @@ do_scroll_bar_anchors :: (parent_rect: Rectangle, anchors: [] $T, color: Vector4
     hover_indexes.allocator = temp;
     array_reserve(*hover_indexes, 16);
 
-    x, effective_h, w, h := scroll_bar_anchor_parameters(parent_rect, text_buffer_line_infos.count);
+    x, effective_h, w, h := scroll_bar_anchor_parameters(parent_rect, the_text_buffer.line_infos.count);
     slack :: 1.2;
     for anchors {
         y := parent_rect.top - (it.line_index + 1) * effective_h;
@@ -855,7 +869,7 @@ do_scroll_bar_anchors :: (parent_rect: Rectangle, anchors: [] $T, color: Vector4
 }
 
 draw_single_scroll_bar_anchor :: (parent_rect: Rectangle, line_index: int, color: Vector4, $$t := 10.0, hover: bool) {
-    x, effective_h, w, h := scroll_bar_anchor_parameters(parent_rect, text_buffer_line_infos.count);
+    x, effective_h, w, h := scroll_bar_anchor_parameters(parent_rect, the_text_buffer.line_infos.count);
     y := parent_rect.top - (line_index + 1) * effective_h;
 
     inline draw_scroll_bar_anchor(x, y, w, h, t, color, hover);
@@ -916,7 +930,7 @@ global_time_range_min := APOLLO_TIME_INVALID;
 global_time_range_max := APOLLO_TIME_INVALID;
 global_time_current_line := APOLLO_TIME_INVALID;
 
-draw_the_text_pane :: (rect: Rectangle) {
+draw_the_text_pane :: (buffer: *Log_Text_Buffer, rect: Rectangle) {
     text_color       := main_text_pane_text_color;
     background_color := main_text_pane_background_color;
 
@@ -929,7 +943,7 @@ draw_the_text_pane :: (rect: Rectangle) {
         if scroll_rows < 0 then y_top += scroll_rows * h;
 
         y_bottom := cast(float) bottom(rect);
-        text_height := (text_buffer_line_infos.count - scroll_rows) * h;
+        text_height := (buffer.line_infos.count - scroll_rows) * h;
         if text_height < xx height(rect) then y_bottom = top(rect) - text_height;
 
 
@@ -948,7 +962,7 @@ draw_the_text_pane :: (rect: Rectangle) {
 
     // text
     {
-        tail := text_buffer_data;
+        tail := buffer.all_text;
 
         h := main_font.line_height;
 
@@ -967,13 +981,13 @@ draw_the_text_pane :: (rect: Rectangle) {
         search_matches_cursor := 0;
         line_index := 0;
         first_line = max(cast(int) floor(scroll_rows), 0);
-        last_line = min(first_line + 1 + cast(int) floor(rect.height / cast(float) h), text_buffer_line_infos.count - 1);
+        last_line = min(first_line + 1 + cast(int) floor(rect.height / cast(float) h), buffer.line_infos.count - 1);
         for line_index: first_line..last_line {
-            info := *text_buffer_line_infos[line_index];
-            line_end := ifx line_index < text_buffer_line_infos.count - 1 then text_buffer_line_infos[line_index + 1].line_offset
-                                                                          else text_buffer_data.count;
+            info := *buffer.line_infos[line_index];
+            line_end := ifx line_index < buffer.line_infos.count - 1 then buffer.line_infos[line_index + 1].line_offset
+                                                                          else buffer.all_text.count;
             line_start := info.line_offset;
-            line := slice(text_buffer_data, line_start, line_end - line_start);
+            line := slice(buffer.all_text, line_start, line_end - line_start);
             if line.count > 0 && line[line.count - 1] == #char "\n" then line.count -= 1;
 
             y := y_top - (line_index * h);
@@ -986,7 +1000,7 @@ draw_the_text_pane :: (rect: Rectangle) {
             if info.source_id != SOURCE_ID_UNKNOWN {
                 color = get_log_source_color(info.source_id);
 
-                source := text_buffer_all_log_sources[info.source_id];
+                source := buffer.all_log_sources[info.source_id];
                 if line_index == hover_line_index && (xx (info.source_start + source.count) > scroll_columns) {
                     x_start := x + (info.source_start - scroll_columns) * main_font.mono_width;
                     x_end := min(x_start + source.count * main_font.mono_width, xx right(rect));
@@ -1029,7 +1043,7 @@ draw_the_text_pane :: (rect: Rectangle) {
                 }
 
                 if info.escape_codes_count != 0 {
-                    codes := array_view(text_buffer_escape_code_infos, info.escape_codes_start, info.escape_codes_count);
+                    codes := array_view(buffer.escape_code_infos, info.escape_codes_start, info.escape_codes_count);
                     draw_text_line_with_ansi_escape_codes(main_font, line, n_columns_to_skip, xx pane_width_in_characters,
                                                           x, -x_tweak, y, text_y_tweak, color, codes, *current_ansi_style, override_ansi_style);
                 } else {
@@ -1079,7 +1093,7 @@ draw_the_text_pane :: (rect: Rectangle) {
         time_range_min := APOLLO_TIME_INVALID;
         time_range_max := APOLLO_TIME_INVALID;
         for first_line..last_line {
-            info := *text_buffer_line_infos[it];
+            info := *buffer.line_infos[it];
             if info.source_id == SOURCE_ID_UNKNOWN continue;
             if info.time_stamp.year == 0 continue;
 
@@ -1115,7 +1129,7 @@ draw_the_text_pane :: (rect: Rectangle) {
         for line_index: first_line..last_line {
             y := y_top - line_index * h;
 
-            info := *text_buffer_line_infos[line_index];
+            info := *buffer.line_infos[line_index];
             if info.source_id == SOURCE_ID_UNKNOWN continue;
             if info.time_stamp.year == 0 continue;
 
@@ -1292,97 +1306,37 @@ screen_position_to_line_index :: (rect: Rectangle, y: float) -> s64 {
 // text buffer stuff
 //
 
-text_buffer_data: string;
-// string owned by `text_buffer_data`
-text_buffer_all_log_sources: [..] string;
-// string owned by `text_buffer_data`
-text_buffer_log_sources_to_pid: Table(string, s32);
-text_buffer_line_infos: [..] Log_Line_Info;
-text_buffer_escape_code_infos: [..] Escape_Code_Info;
-merged_log_sources: [..] Merge_Info;
+Log_Text_Buffer :: struct {
+    all_text: string;
+    line_infos: [..] Log_Line_Info;
+    max_line_length: int;
 
-Merge_Info :: struct { from, to: u8; }
+    // string owned by `all_text`
+    all_log_sources: [..] string;
+    // string owned by `all_text`
+    sources_to_pid: Table(string, s32);
+    merged_log_sources: [..] Merge_Info;
+    log_ranges_of_source: [..] Log_Range;
 
-Log_Line_Info :: struct {
-    line_offset: s64;
-    time_stamp: Calendar_Time;
-    source_id: u8 = SOURCE_ID_UNKNOWN;
-    source_start: u8;
-    escape_codes_start: s16;
-    escape_codes_count: s16;
-    pid: s32 = -1;
+    escape_code_infos: [..] Escape_Code_Info;
+}
+the_text_buffer: Log_Text_Buffer;
+
+reset_text_buffer :: (using buffer: *Log_Text_Buffer) {
+    array_reset_keeping_memory(*line_infos);
+    max_line_length = 0;
+
+    array_reset_keeping_memory(*all_log_sources);
+    array_reserve(*all_log_sources, SOURCE_ID_UNKNOWN);
+    // keeps memory
+    table_reset(*sources_to_pid);
+    array_reset_keeping_memory(*merged_log_sources);
+    array_reset_keeping_memory(*log_ranges_of_source);
+
+    array_reset_keeping_memory(*escape_code_infos);
 }
 
-Escape_Code_Info :: struct {
-    // relative to line start
-    start: s32;
-    count: u8;
-    sequence: Small_Escape_Sequence;
-}
-#assert size_of(Escape_Code_Info) == 16;
-
-color_red :: #run hex_color("db0011");
-color_green :: #run hex_color("00c52c");
-color_blue :: #run hex_color("0069cb");
-color_coral :: #run hex_color("ff8080");
-color_yellow :: #run hex_color("ffdf00");
-color_cyan :: #run hex_color("208c73");
-color_magenta :: #run hex_color("ff00bb");
-color_orange :: #run hex_color("ff6b00");
-color_baby_blue :: #run hex_color("6bc8f2");
-color_purple :: #run hex_color("a000ff");
-color_white :: #run hex_color("ffffff");
-color_brown :: #run hex_color("973f00");
-color_black :: #run hex_color("000000");
-color_gray :: #run hex_color("707070");
-
-log_source_color_scheme := Vector4.[
-    color_coral,
-    color_yellow,
-    color_cyan,
-    color_magenta,
-    color_orange,
-    color_baby_blue,
-    color_purple,
-    color_red,
-    color_green,
-    color_blue,
-    color_white,
-    color_brown,
-];
-
-get_log_source_color :: (source_id: u8) -> Vector4 {
-    if source_id == SOURCE_ID_UNKNOWN return main_text_pane_text_color;
-
-    for merged_log_sources if it.from == source_id return get_log_source_color(it.to);
-
-    return log_source_color_scheme[source_id % log_source_color_scheme.count];
-}
-
-log_source_open_popup_menu :: (info: *Log_Line_Info, mouse: Vector2) {
-    menu := open_the_popup_menu(mouse, log_line_popup_menu_callback, info.source_id);
-
-    for log_source, source_id: text_buffer_all_log_sources {
-        // Skip self
-        if source_id == info.source_id continue;
-
-        if !ok_to_merge(merged_log_sources, from=xx source_id, to=info.source_id) continue;
-
-        color := get_log_source_color(xx source_id);
-        pids := table_find_multiple(*text_buffer_log_sources_to_pid, log_source);
-        popup_menu_push_item(menu, "Merge with % (pid: %)", log_source, pids, id=source_id, icon=.{color, 8.0, .SQUARE});
-    }
-}
-
-Log_Range :: struct {
-    source_id: u8;
-    start_index: int;
-}
-log_ranges_of_source: [..] Log_Range;
-
-SOURCE_ID_UNKNOWN :: cast(u8) 0xff;
-
-load_text_buffer_data :: (from_clipboard := false) {
+load_text_buffer_data :: (buffer: *Log_Text_Buffer, from_clipboard := false) {
     mark := get_temporary_storage_mark();
     defer set_temporary_storage_mark(mark);
 
@@ -1400,54 +1354,45 @@ load_text_buffer_data :: (from_clipboard := false) {
         assert(ok);
     }
 
-    free(text_buffer_data);
-    text_buffer_data = new_data;
+    free(buffer.all_text);
+    buffer.all_text = new_data;
 
-    process_text_buffer_data();
+    process_text_buffer_data(buffer);
 }
 
-process_text_buffer_data :: () {
+process_text_buffer_data :: (using buffer: *Log_Text_Buffer) {
     // TODO: keeping history, undo/redo, etc.
 
-    if contains(text_buffer_data, #char "\r") {
+    if contains(all_text, #char "\r") {
         // FIXME could also replace this in place...
-        new_data := replace(text_buffer_data, "\r\n", "\n");
-        free(text_buffer_data);
-        text_buffer_data = new_data;
-        replace_in_place(text_buffer_data, #char "\r", #char "\n");
+        new_data := replace(all_text, "\r\n", "\n");
+        free(all_text);
+        all_text = new_data;
+        replace_in_place(all_text, #char "\r", #char "\n");
     }
 
-    array_reset_keeping_memory(*text_buffer_all_log_sources);
-    // keeps memory
-    table_reset(*text_buffer_log_sources_to_pid);
-    array_reset_keeping_memory(*merged_log_sources);
-    array_reserve(*text_buffer_all_log_sources, SOURCE_ID_UNKNOWN);
-    array_reset_keeping_memory(*text_buffer_line_infos);
-    array_reset_keeping_memory(*log_ranges_of_source);
-    array_reset_keeping_memory(*text_buffer_escape_code_infos);
+    reset_text_buffer(buffer);
 
-    max_line_length := 0;
-
-    tail := text_buffer_data;
+    tail := all_text;
     line_index := 0;
     while tail {
         defer line_index += 1;
         found:, line:, tail = split_from_left(tail, #char "\n");
-        info := array_add(*text_buffer_line_infos);
-        info.line_offset = line.data - text_buffer_data.data;
+        info := array_add(*line_infos);
+        info.line_offset = line.data - the_text_buffer.all_text.data;
 
         max_line_length = max(max_line_length, line.count);
 
-        ok := inline parse_text_buffer_log_line(line, info);
+        ok := inline parse_log_line(*the_text_buffer, line, info);
 
         if log_ranges_of_source.count == 0 || last(log_ranges_of_source).source_id != info.source_id {
             array_add(*log_ranges_of_source, .{ info.source_id, line_index });
         }
 
-        // line_offset := line.data - text_buffer_data.data;
-        info.escape_codes_start = xx text_buffer_escape_code_infos.count;
-        parse_ansi_escape_codes(line, 0, *text_buffer_escape_code_infos);
-        info.escape_codes_count = xx (text_buffer_escape_code_infos.count - info.escape_codes_start);
+        // line_offset := line.data - the_text_buffer.all_text.data;
+        info.escape_codes_start = xx escape_code_infos.count;
+        parse_ansi_escape_codes(line, 0, *escape_code_infos);
+        info.escape_codes_count = xx (escape_code_infos.count - info.escape_codes_start);
 
         if !ok continue;
 
@@ -1456,10 +1401,10 @@ process_text_buffer_data :: () {
     // Add a dummy range start at the end for convenience
     array_add(*log_ranges_of_source, .{ SOURCE_ID_UNKNOWN, line_index });
 
-    for to, to_id: text_buffer_all_log_sources for from, from_id: text_buffer_all_log_sources {
+    for to, to_id: the_text_buffer.all_log_sources for from, from_id: the_text_buffer.all_log_sources {
         if to_id == from_id continue;
-        to_pids := table_find_multiple(*text_buffer_log_sources_to_pid, to);
-        from_pids := table_find_multiple(*text_buffer_log_sources_to_pid, from);
+        to_pids := table_find_multiple(*sources_to_pid, to);
+        from_pids := table_find_multiple(*sources_to_pid, from);
         for from_pid: from_pids for to_pid: to_pids {
             if from_pid != to_pid continue;
             if !ok_to_merge(merged_log_sources, from=xx from_id, to=xx to_id) continue;
@@ -1469,28 +1414,28 @@ process_text_buffer_data :: () {
     }
 
     // line_index := 0;
-    // while line_index < text_buffer_line_infos.count {
+    // while line_index < line_infos.count {
     //     defer line_index += 1000;
     //     array_add(*explicit_anchors, .{ line_index });
     // }
 
-    log("line count: %", text_buffer_line_infos.count);
+    log("line count: %", line_infos.count);
     log("max line length: %", max_line_length);
-    log("escape code count: % (% unique)", text_buffer_escape_code_infos.count, escape_code_stats.count);
+    log("escape code count: % (% unique)", escape_code_infos.count, escape_code_stats.count);
 
     // for escape_code_stats {
     //     log("'%': %, seen % times", cast(Ascii_Or_Hex) it_index, parse_escape_sequence(it_index), it);
     // }
 
     if search_results.matches {
-        update_text_buffer_search_results(search_results.search_string);
+        update_text_buffer_search_results(buffer, search_results.search_string);
     }
 }
 
-text_buffer_data_remove_range :: (first_line: s64, last_line: s64) {
+remove_line_range :: (using buffer: *Log_Text_Buffer, first_line: s64, last_line: s64) {
     assert(0 <= first_line, "%", first_line);
     assert(first_line <= last_line, "% v %", first_line, last_line);
-    assert(last_line <= text_buffer_line_infos.count, "% v %", last_line, text_buffer_line_infos.count);
+    assert(last_line <= line_infos.count, "% v %", last_line, line_infos.count);
 
     n_lines_removed := last_line - first_line + 1;
     for *explicit_anchors {
@@ -1507,19 +1452,38 @@ text_buffer_data_remove_range :: (first_line: s64, last_line: s64) {
         target_scroll_rows -= n_lines_removed;
     }
 
-    start := text_buffer_line_infos[first_line].line_offset;
-    end := ifx last_line >= text_buffer_line_infos.count - 1 then text_buffer_data.count
-                                                             else text_buffer_line_infos[last_line + 1].line_offset;
+    start := line_infos[first_line].line_offset;
+    // FIXME this should be a function
+    end := ifx last_line >= line_infos.count - 1 then all_text.count
+                                                 else line_infos[last_line + 1].line_offset;
 
-    moved := text_buffer_data.count - end;
+    moved := all_text.count - end;
     removed := end - start;
-    memcpy(text_buffer_data.data + start, text_buffer_data.data + end, moved);
-    text_buffer_data.count -= removed;
+    memcpy(all_text.data + start, all_text.data + end, moved);
+    all_text.count -= removed;
 
-    process_text_buffer_data();
+    process_text_buffer_data(buffer);
 }
 
-parse_text_buffer_log_line :: (line: string, info: *Log_Line_Info) -> bool {
+//
+// log line info stuff
+//
+
+Log_Line_Info :: struct {
+    line_offset: s64;
+    time_stamp: Calendar_Time;
+    source_id: u8 = SOURCE_ID_UNKNOWN;
+    source_start: u8;
+    pid: s32 = -1;
+    thread_name_offset: u8;
+    fiber_id: s16;
+    fiber_name_offset: s16;
+    log_level: u8;
+    escape_codes_start: s16;
+    escape_codes_count: s16;
+}
+
+parse_log_line :: (buffer: *Log_Text_Buffer, line: string, info: *Log_Line_Info) -> bool {
     cursor := 0;
 
     // skip whitespace
@@ -1567,7 +1531,7 @@ parse_text_buffer_log_line :: (line: string, info: *Log_Line_Info) -> bool {
         // @HACK I want to ingore lines like ` 123 |  let compilation = error;`
         // but keep lines which come from audit (why do I even bother?)
         if source_is_not_number {
-            source_id := add_source(*text_buffer_all_log_sources, source);
+            source_id := add_source(*buffer.all_log_sources, source);
             info.source_start = xx source_start;
             info.source_id = source_id;
         }
@@ -1577,7 +1541,7 @@ parse_text_buffer_log_line :: (line: string, info: *Log_Line_Info) -> bool {
         return false;
     }
 
-    source_id := add_source(*text_buffer_all_log_sources, source);
+    source_id := add_source(*buffer.all_log_sources, source);
     info.source_start = xx source_start;
     info.source_id = source_id;
 
@@ -1615,16 +1579,69 @@ parse_text_buffer_log_line :: (line: string, info: *Log_Line_Info) -> bool {
 
     info.pid = pid;
     already_seen := false;
-    for table_find_multiple(*text_buffer_log_sources_to_pid, source) {
+    for table_find_multiple(*buffer.sources_to_pid, source) {
         if it == pid {
             already_seen = true;
             break;
         }
     }
     if !already_seen
-        table_add(*text_buffer_log_sources_to_pid, source, pid);
+        table_add(*buffer.sources_to_pid, source, pid);
+
+    //
+    // parse thread/fiber id/fiber name
+    //
 
     return true;
+}
+
+//
+// log source stuff
+//
+
+Log_Range :: struct {
+    source_id: u8;
+    start_index: int;
+}
+
+SOURCE_ID_UNKNOWN :: cast(u8) 0xff;
+
+log_source_color_scheme := Vector4.[
+    color_coral,
+    color_yellow,
+    color_cyan,
+    color_magenta,
+    color_orange,
+    color_baby_blue,
+    color_purple,
+    color_red,
+    color_green,
+    color_blue,
+    color_white,
+    color_brown,
+];
+
+get_log_source_color :: (source_id: u8) -> Vector4 {
+    if source_id == SOURCE_ID_UNKNOWN return main_text_pane_text_color;
+
+    for the_text_buffer.merged_log_sources if it.from == source_id return get_log_source_color(it.to);
+
+    return log_source_color_scheme[source_id % log_source_color_scheme.count];
+}
+
+log_source_open_popup_menu :: (info: *Log_Line_Info, mouse: Vector2) {
+    menu := open_the_popup_menu(mouse, log_line_popup_menu_callback, info.source_id);
+
+    for log_source, source_id: the_text_buffer.all_log_sources {
+        // Skip self
+        if source_id == info.source_id continue;
+
+        if !ok_to_merge(the_text_buffer.merged_log_sources, from=xx source_id, to=info.source_id) continue;
+
+        color := get_log_source_color(xx source_id);
+        pids := table_find_multiple(*the_text_buffer.sources_to_pid, log_source);
+        popup_menu_push_item(menu, "Merge with % (pid: %)", log_source, pids, id=source_id, icon=.{color, 8.0, .SQUARE});
+    }
 }
 
 add_source :: (sources: *[..] string, source: string) -> source_id: u8 {
@@ -1638,12 +1655,14 @@ add_source :: (sources: *[..] string, source: string) -> source_id: u8 {
     return xx (sources.count - 1);
 }
 
+Merge_Info :: struct { from, to: u8; }
+
 ok_to_merge :: (merges: [] Merge_Info, from: u8, to: u8) -> ok: bool {
     // Merging these 2 would lead to an infinite loop
-    if detect_cycle(merged_log_sources, from=from, to=to) return false;
+    if detect_cycle(merges, from=from, to=to) return false;
 
     // Skip ones that are already merged somewhere, don't merge them to anything else
-    for merge: merged_log_sources if merge.from == from return false;
+    for merge: merges if merge.from == from return false;
 
     return true;
 }
@@ -1664,7 +1683,7 @@ log_line_popup_menu_callback :: (menu: *Popup_Menu, event: Popup_Menu.Event) {
 
     if event == .CLICK {
         id := menu.items[menu.hovered_item].id;
-        array_add(*merged_log_sources, .{to=xx this_source_id, from=xx id});
+        array_add(*the_text_buffer.merged_log_sources, .{to=xx this_source_id, from=xx id});
         log("merged sources % and %", this_source_id, id);
     }
 }
@@ -1678,6 +1697,8 @@ Search_Results :: struct {
     search_string: string;
     case_insensitive := false;
     matches: [..] Search_Match_Info;
+
+    text_buffer: *Log_Text_Buffer;
 }
 MAX_SEARCH_STRING_LENGTH :: 255;
 
@@ -1691,13 +1712,14 @@ search_match_color :: #run hex_color("f5a511");
 
 search_results: Search_Results;
 
-update_text_buffer_search_results :: (search_string: string) {
+update_text_buffer_search_results :: (using buffer: *Log_Text_Buffer, search_string: string) {
     assert(search_string.count < search_results.search_string_storage.count, "%", search_string.count);
     memcpy(search_results.search_string_storage.data, search_string.data, search_string.count);
     search_results.search_string_storage[search_string.count] = 0; // XXX I don't really need this...
     search_results.search_string.data = search_results.search_string_storage.data;
     search_results.search_string.count = search_string.count;
 
+    search_results.text_buffer = buffer;
     array_reset_keeping_memory(*search_results.matches);
     search_results.case_insensitive = false;
 
@@ -1708,11 +1730,11 @@ update_text_buffer_search_results :: (search_string: string) {
 
     next_range_cursor := 0;
 
-    for line_index: 0..text_buffer_line_infos.count - 2 {
-        info := text_buffer_line_infos[line_index];
-        next_info := text_buffer_line_infos[line_index + 1];
+    for line_index: 0..buffer.line_infos.count - 2 {
+        info := buffer.line_infos[line_index];
+        next_info := buffer.line_infos[line_index + 1];
         line_length := next_info.line_offset - info.line_offset - 1; // - 1 because there's a "\n"
-        line := slice(text_buffer_data, info.line_offset, line_length);
+        line := slice(buffer.all_text, info.line_offset, line_length);
 
         if !line continue;
 
@@ -1721,12 +1743,12 @@ update_text_buffer_search_results :: (search_string: string) {
                                            else offset = search_for_match_case_sensitive(line, search_string_lowercase);
 
         source_id := SOURCE_ID_UNKNOWN;
-        while next_range_cursor < log_ranges_of_source.count {
-            if log_ranges_of_source[next_range_cursor].start_index > line_index break;
+        while next_range_cursor < buffer.log_ranges_of_source.count {
+            if buffer.log_ranges_of_source[next_range_cursor].start_index > line_index break;
             next_range_cursor += 1;
         }
         assert(next_range_cursor > 0);
-        range_info := log_ranges_of_source[next_range_cursor - 1];
+        range_info := buffer.log_ranges_of_source[next_range_cursor - 1];
         assert(range_info.start_index <= line_index);
         source_id = range_info.source_id;
 
@@ -1959,7 +1981,7 @@ text_search_ui_handle_input_event :: (event: Input.Event) -> handled: bool {
     if !status return false;
 
     if status & .TEXT_CHANGED {
-        update_text_buffer_search_results(xx text_search_input.buffer);
+        update_text_buffer_search_results(*the_text_buffer, xx text_search_input.buffer);
     }
 
     if status & .ENTER_HIT {
@@ -2167,11 +2189,11 @@ anchor_button_popup_menu_callback :: (menu: *Popup_Menu, event: Popup_Menu.Event
             if event == .CLICK {
                 anchor_index := get_or_add_anchor_button(data.line_index);
                 anchor := *explicit_anchors[anchor_index];
-                source_id := text_buffer_line_infos[anchor.line_index].source_id;
+                source_id := the_text_buffer.line_infos[anchor.line_index].source_id;
                 anchor.color = get_log_source_color(source_id);
                 anchor.flags |= .TEXT_VISIBLE;
                 x := left(scroll_bar_rect) - 16.0;
-                total_line_count := text_buffer_line_infos.count;
+                total_line_count := the_text_buffer.line_infos.count;
                 dy := height(scroll_bar_rect) / cast(float) total_line_count;
                 y := top(scroll_bar_rect) - data.line_index * dy - calculate_height(*the_popup_text_input) / 2.0;
                 // @LAME FIXME use a memory pool instead of New/free
@@ -2201,7 +2223,7 @@ anchor_button_popup_menu_callback :: (menu: *Popup_Menu, event: Popup_Menu.Event
         case .DELETE_LINES_DOWN;
             first = make_anchor(data.line_index);
             last = data.anchor_bellow;
-            if last.line_index == -1 then last.line_index = text_buffer_line_infos.count - 1;
+            if last.line_index == -1 then last.line_index = the_text_buffer.line_infos.count - 1;
     }
 
     if command == .DELETE_1_LINE || command == .DELETE_LINES_UP || command == .DELETE_LINES_DOWN {
@@ -2209,7 +2231,7 @@ anchor_button_popup_menu_callback :: (menu: *Popup_Menu, event: Popup_Menu.Event
         active_anchor_segment[1] = last;
 
         if event == .CLICK
-            text_buffer_data_remove_range(first.line_index, last.line_index);
+            remove_line_range(*the_text_buffer, first.line_index, last.line_index);
     }
 }
 
@@ -3231,6 +3253,14 @@ convert_wsl_path_to_windows :: (path: string) -> string {
 //
 // ansi escape sequences
 //
+
+Escape_Code_Info :: struct {
+    // relative to line start
+    start: s32;
+    count: u8;
+    sequence: Small_Escape_Sequence;
+}
+#assert size_of(Escape_Code_Info) == 16;
 
 escape_code_stats: Table(string, int);
 escape_code_stats_pool: Pool;
