@@ -749,8 +749,8 @@ update_and_draw_frame :: () -> bool {
     {
         rect := window_rect;
         font := ui_font.regular;
-        x := right(window_rect) - 300;
-        y := window_rect.top - 4;
+        x := right(window_rect) - 300.0;
+        y := window_rect.top - 4.0;
 
         builder: String_Builder; builder.allocator = temp;
         elapsed := seconds_since_init() - t0;
@@ -778,7 +778,7 @@ update_and_draw_frame :: () -> bool {
         for redraw_reasons print(*builder, "%\n", it);
 
         pane_text := builder_to_string(*builder,, temp);
-        draw_simple_text_pane(rect, font, x, y, pane_text, hex_color("ffffff"), hex_color("181818"));
+        draw_simple_text_pane(rect, font, .{x, y}, .TOP_LEFT, pane_text, hex_color("ffffff"), hex_color("181818"));
     }
 
     // // @TEMPORARY
@@ -808,6 +808,7 @@ update_and_draw_frame :: () -> bool {
 // scroll bar stuff
 //
 
+// I hate this procedure
 do_scroll_bar_anchors :: (parent_rect: Rectangle, anchors: [] $T, color: Vector4, $mode: enum { DRAW; GET_HOVER; }, target_in_rect: Vector2, $$t := 10.0) -> (index: s64) {
     target := target_in_rect;
     hover_color := scroll_bar_anchor_hover_color;
@@ -831,6 +832,10 @@ do_scroll_bar_anchors :: (parent_rect: Rectangle, anchors: [] $T, color: Vector4
             #if T == Search_Match_Info then color_ = get_log_source_color(it.source_id);
             else #if T == Anchor then color_ = it.color;
             inline draw_scroll_bar_anchor(x, y, w, h, t, color_, false);
+            #if T == Anchor if hover || it.flags & .TEXT_VISIBLE {
+                label_right := x + p1.x - 1;
+                draw_simple_text_pane(window_rect, ui_font.regular, .{label_right, y}, .MIDDLE_RIGHT, it.text, ui_element_text_color, ui_element_background_color);
+            }
             if hover then array_add(*hover_indexes, it_index);
 
         case .GET_HOVER;
@@ -900,6 +905,11 @@ main_text_pane_text_color           :: #run hex_color("e0e0e0");
 main_text_pane_dim_text_color       :: #run hex_color("909090");
 main_text_pane_background_color     :: #run hex_color("202020");
 main_text_pane_dim_background_color :: #run hex_color("404040");
+
+ui_element_background_color :: #run hex_color("181818");
+ui_element_border_color     :: #run hex_color("303030");
+ui_element_cursor_color     :: #run hex_color("ffffff");
+ui_element_text_color       :: #run hex_color("ffffff");
 
 // @DEBUG
 global_time_range_min := APOLLO_TIME_INVALID;
@@ -1919,16 +1929,17 @@ load_font :: (name: string, font: *My_Dynamic_Font) {
 // text search ui
 //
 
+// TODO make it a struct
 text_search_ui_open := false;
 text_search_ui_active := false;
 text_search_builder: String_Builder;
 text_search_string: string;
 text_search_ui_rect: Rectangle;
 
-text_search_ui_background_color :: #run hex_color("181818");
-text_search_ui_border_color :: #run hex_color("303030");
-text_search_ui_cursor_color :: #run hex_color("ffffff");
-text_search_ui_text_color :: #run hex_color("ffffff");
+text_search_ui_background_color :: ui_element_background_color;
+text_search_ui_border_color     :: ui_element_border_color;
+text_search_ui_cursor_color     :: ui_element_cursor_color;
+text_search_ui_text_color       :: ui_element_text_color;
 text_search_ui_border_width :: 3.0;
 
 text_search_input := Text_Input_State.{
@@ -2104,11 +2115,13 @@ anchor_button_open_popup_menu :: (line_index: int, mouse: Vector2) {
     if active then popup_menu_push_item(menu, "Remove anchor", id=xx TOGGLE);
               else popup_menu_push_item(menu, "Add anchor", id=xx TOGGLE);
 
-    // FIXME if no anchor it should say "set text" otherwise it should say "edit text"
-    popup_menu_push_item(menu, "Set/Edit text", id=xx EDIT_TEXT);
+    if active && anchor.text != "" then popup_menu_push_item(menu, "Edit text", id=xx EDIT_TEXT);
+                                   else popup_menu_push_item(menu, "Set text", id=xx EDIT_TEXT);
 
-    // FIXME text based on current state
-    popup_menu_push_item(menu, "Toggle text visibility", id=xx TOGGLE_TEXT_VISIBILITY);
+    if active && anchor.text != "" {
+        if anchor.flags & .TEXT_VISIBLE then popup_menu_push_item(menu, "Hide text", id=xx TOGGLE_TEXT_VISIBILITY);
+                                        else popup_menu_push_item(menu, "Show text", id=xx TOGGLE_TEXT_VISIBILITY);
+    }
 
     popup_menu_push_item(menu, "Delete 1 line", id=xx DELETE_1_LINE);
 
@@ -2376,7 +2389,12 @@ do_popup_menu :: (menu: *Popup_Menu, mouse: Vector2, handle_click: bool, $do_dra
     return handled;
 }
 
-draw_simple_text_pane :: (parent_rect: Rectangle, font: *Simp.Dynamic_Font, left: s64, top: s64, text: string, text_color: Vector4, background_color: Vector4) {
+Point_Relative_To :: enum {
+    TOP_LEFT;
+    MIDDLE_RIGHT;
+}
+
+draw_simple_text_pane :: (parent_rect: Rectangle, font: *Simp.Dynamic_Font, point: Vector2, relative_to: Point_Relative_To, text: string, text_color: Vector4, background_color: Vector4) {
     if !text return;
 
     h := font.character_height;
@@ -2393,24 +2411,32 @@ draw_simple_text_pane :: (parent_rect: Rectangle, font: *Simp.Dynamic_Font, left
         text_w_max = max(text_w, text_w_max);
     }
 
-    x := parent_rect.left + left;
-    y := bottom(parent_rect) + top;
+    H := h * line_count;
+    x_left, y_top: float;
+    if #complete relative_to == {
+        case .TOP_LEFT;
+            x_left = parent_rect.left + point.x;
+            y_top = bottom(parent_rect) + point.y;
+        case .MIDDLE_RIGHT;
+            x_left = parent_rect.left + point.x - text_w_max;
+            y_top = bottom(parent_rect) + H / 2 + point.y;
+    }
 
     // draw background rect
     {
-        X := x - x_pad;
-        H := h * line_count;
-        Y := y - H + 1;
+        X := x_left - x_pad;
+        Y := y_top - H + 1;
         W := text_w_max + x_pad * 2;
         draw_axis_aligned_rectangle(xx X, xx Y, xx W, xx H, background_color);
     }
 
     // draw the text
+    y := y_top;
     tail = text;
     for 1..line_count {
         y -= h;
         found:, line:, tail = split_from_left(tail, #char "\n");
-        Simp.draw_text(font, xx x, xx y + text_y_tweak, line, text_color);
+        Simp.draw_text(font, xx x_left, xx y + text_y_tweak, line, text_color);
     }
 }
 
