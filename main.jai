@@ -997,11 +997,7 @@ draw_the_text_pane :: (buffer: *Log_Text_Buffer, rect: Rectangle) {
         last_line = min(first_line + 1 + cast(int) floor(rect.height / cast(float) h), buffer.line_infos.count - 1);
         for line_index: first_line..last_line {
             info := *buffer.line_infos[line_index];
-            line_end := ifx line_index < buffer.line_infos.count - 1 then buffer.line_infos[line_index + 1].line_offset
-                                                                          else buffer.all_text.count;
-            line_start := info.line_offset;
-            line := slice(buffer.all_text, line_start, line_end - line_start);
-            if line.count > 0 && line[line.count - 1] == #char "\n" then line.count -= 1;
+            line := get_line(buffer, line_index);
 
             y := y_top - (line_index * h);
 
@@ -1331,6 +1327,13 @@ Log_Text_Buffer :: struct {
     merged_log_sources: [..] Merge_Info;
     log_ranges_of_source: [..] Log_Range;
 
+    // string owned by `all_text`
+    all_thread_names: [..] string;
+    // string owned by `all_text`
+    all_fiber_names: [..] string;
+    // string owned by `all_text`
+    all_module_names: [..] string;
+
     escape_code_infos: [..] Escape_Code_Info;
 }
 the_text_buffer: Log_Text_Buffer;
@@ -1347,6 +1350,16 @@ reset_text_buffer :: (using buffer: *Log_Text_Buffer) {
     array_reset_keeping_memory(*log_ranges_of_source);
 
     array_reset_keeping_memory(*escape_code_infos);
+}
+
+get_line :: (using buffer: *Log_Text_Buffer, line_index: int) -> string {
+    if line_index == line_infos.count return "";
+    start := line_infos[line_index].line_offset;
+    end := ifx line_index + 1 < line_infos.count then line_infos[line_index + 1].line_offset
+                                                 else all_text.count;
+    if (end > start) && (all_text[end - 1] == #char "\n") then end -= 1;
+    line := slice(all_text, start, end - start);
+    return line;
 }
 
 load_text_buffer_data :: (buffer: *Log_Text_Buffer, from_clipboard := false) {
@@ -1488,13 +1501,17 @@ Log_Line_Info :: struct {
     source_id: u8 = SOURCE_ID_UNKNOWN;
     source_start: u8;
     pid: s32 = -1;
-    thread_name_offset: u8;
+    thread_name_offset: u8 = THREAD_NAME_UNKNOWN;
     fiber_id: s16;
-    fiber_name_offset: s16;
+    fiber_name_offset: s16 = -1;
+    module_name_offset: u8 = MODULE_NAME_UNKNOWN;
     log_level: u8;
     escape_codes_start: s16;
     escape_codes_count: s16;
 }
+
+THREAD_NAME_UNKNOWN :: 0xff;
+MODULE_NAME_UNKNOWN :: 0xff;
 
 parse_log_line :: (buffer: *Log_Text_Buffer, line: string, info: *Log_Line_Info) -> bool {
     cursor := 0;
@@ -1518,6 +1535,7 @@ parse_log_line :: (buffer: *Log_Text_Buffer, line: string, info: *Log_Line_Info)
     if cursor == source_start return false;
 
     source_count := cursor - source_start;
+    source := slice(line, source_start, source_count);
 
     // skip whitespace
     while cursor < line.count && inline is_space(line[cursor]) { cursor += 1; }
@@ -1525,8 +1543,6 @@ parse_log_line :: (buffer: *Log_Text_Buffer, line: string, info: *Log_Line_Info)
     if cursor >= line.count return false;
     if line[cursor] != #char "|" return false;
     cursor += 1;
-
-    source := slice(line, source_start, source_count);
 
     // skip whitespace
     while cursor < line.count && inline is_space(line[cursor]) { cursor += 1; }
@@ -1605,7 +1621,113 @@ parse_log_line :: (buffer: *Log_Text_Buffer, line: string, info: *Log_Line_Info)
     // parse thread/fiber id/fiber name
     //
 
+    // skip whitespace
+    while cursor < line.count && inline is_space(line[cursor]) { cursor += 1; }
+
+    // thread name
+    thread_name_start := cursor;
+
+    while (cursor < line.count) && (line[cursor] != #char "/") cursor += 1;
+    if cursor == line.count return false;
+
+    thread_name_end := cursor;
+    assert(line[cursor] == #char "/"); cursor += 1;
+
+    // Tarantool's human-readable log format is impossible to parse.
+    // Here's a dumb heuristic
+
+    // fiber id
+    fiber_id: s16;
+    while cursor < line.count {
+        fiber_id_start := cursor;
+        while (cursor < line.count) && (line[cursor] != #char "/") cursor += 1;
+        if cursor == line.count return false;
+        assert(line[cursor] == #char "/");
+
+        text := slice(line, fiber_id_start, cursor - fiber_id_start);
+        fiber_id = inline parse_positive_number(text, s16);
+        if fiber_id != 0 break;
+
+        thread_name_end = cursor;
+        cursor += 1;
+    }
+
+    thread_name := slice(line, thread_name_start, thread_name_end - thread_name_start);
+    thread_name_offset := add_thread_name(*buffer.all_thread_names, thread_name);
+    info.thread_name_offset = thread_name_offset;
+
+    assert(fiber_id != 0);
+    info.fiber_id = fiber_id;
+
+    assert(line[cursor] == #char "/"); cursor += 1;
+
+    // fiber name
+    fiber_name_start := cursor;
+    while cursor + 2 < line.count {
+        c0 := line[cursor];
+        c1 := line[cursor + 1];
+        c2 := line[cursor + 2];
+        if c0 == #char " " && c2 == #char ">" && (c1 >= #char "A" && c1 <= #char "Z") break;
+        cursor += 1;
+    }
+
+    fiber_name := slice(line, fiber_name_start, cursor - fiber_name_start);
+
+    fiber_name=, module_name, location := parse_fiber_name_and_the_rest_of_the_garbage(fiber_name);
+    fiber_name_offset := add_fiber_name(*buffer.all_fiber_names, fiber_name);
+    info.fiber_name_offset = fiber_name_offset;
+
+    module_name_offset := add_module_name(*buffer.all_module_names, module_name);
+    info.module_name_offset = module_name_offset;
+
+    //
+    // log level
+    //
+    if cursor + 2 >= line.count return false;
+
+    assert(line[cursor] == #char " "); cursor += 1;
+    log_level := line[cursor]; cursor += 1;
+    assert(line[cursor] == #char ">"); cursor += 1;
+    info.log_level = log_level;
+
+    // the rest is just the log message
+
     return true;
+}
+
+parse_fiber_name_and_the_rest_of_the_garbage :: (text: string) -> (fiber_name: string, module: string, location: string) {
+    fiber_name := text;
+    module := "";
+    location := "";
+    last_space := find_index_from_right(fiber_name, #char " ");
+    if last_space != -1 {
+        maybe_source_location := advance(fiber_name, last_space + 1);
+        found, file, line := split_from_left(maybe_source_location, #char ":");
+        if found && (parse_positive_number(line, int) != 0) {
+            fiber_name.count = last_space;
+            location = maybe_source_location;
+        }
+    }
+
+    found:, fiber_name, module = split_from_left(fiber_name, #char "/");
+
+    return fiber_name, module, location;
+}
+
+parse_positive_number :: (text: string, $T: Type) -> T
+#modify { return T == u8 || T == u16 || T == u32 || T == u64 || T == s8 || T == s16 || T == s32 || T == s64; }
+{
+    if !text return 0;
+
+    result: T = 0;
+    cursor := 0;
+    while cursor < text.count {
+        d := text[cursor]; cursor += 1;
+        if !inline is_digit(d) return 0;
+        result = result * 10 + (d - #char "0");
+    }
+
+    return result;
 }
 
 //
@@ -1666,6 +1788,39 @@ add_source :: (sources: *[..] string, source: string) -> source_id: u8 {
 
     array_add(sources, source);
     return xx (sources.count - 1);
+}
+
+add_thread_name :: (thread_names: *[..] string, thread_name: string) -> thread_name_offset: u8 {
+    for thread_names.* {
+        if it == thread_name return xx it_index;
+    }
+
+    if thread_names.count == THREAD_NAME_UNKNOWN return THREAD_NAME_UNKNOWN;
+
+    array_add(thread_names, thread_name);
+    return xx (thread_names.count - 1);
+}
+
+add_fiber_name :: (fiber_names: *[..] string, fiber_name: string) -> fiber_name_offset: s16 {
+    for fiber_names.* {
+        if it == fiber_name return xx it_index;
+    }
+
+    if fiber_names.count >= S16_MAX return -1;
+
+    array_add(fiber_names, fiber_name);
+    return xx (fiber_names.count - 1);
+}
+
+add_module_name :: (module_names: *[..] string, module_name: string) -> module_name_offset: u8 {
+    for module_names.* {
+        if it == module_name return xx it_index;
+    }
+
+    if module_names.count >= MODULE_NAME_UNKNOWN return MODULE_NAME_UNKNOWN;
+
+    array_add(module_names, module_name);
+    return xx (module_names.count - 1);
 }
 
 Merge_Info :: struct { from, to: u8; }
@@ -1743,12 +1898,8 @@ update_text_buffer_search_results :: (using buffer: *Log_Text_Buffer, search_str
 
     next_range_cursor := 0;
 
-    for line_index: 0..buffer.line_infos.count - 2 {
-        info := buffer.line_infos[line_index];
-        next_info := buffer.line_infos[line_index + 1];
-        line_length := next_info.line_offset - info.line_offset - 1; // - 1 because there's a "\n"
-        line := slice(buffer.all_text, info.line_offset, line_length);
-
+    for line_index: 0..buffer.line_infos.count - 1 {
+        line := get_line(buffer, line_index);
         if !line continue;
 
         offset := 0;
