@@ -272,6 +272,8 @@ update_and_draw_frame :: () -> bool {
         height = xx (main_font.line_height + text_search_ui_border_width * 4);
     }
 
+    old_main_font_pixel_height := main_font.pixel_height;
+
     //
     // handle input events
     //
@@ -281,13 +283,6 @@ update_and_draw_frame :: () -> bool {
         if is_down(.CTRL)  modifiers |= .CTRL;
         if is_down(.SHIFT) modifiers |= .SHIFT;
         if is_down(.ALT)   modifiers |= .ALT;
-
-        // if !it.repeat {
-        //     if it.type == .MOUSE_WHEEL
-        //         log("% % %", it.type, it.wheel_delta, it.touch_type);
-        //     else
-        //         log("%", it);
-        // }
 
         if it.type == .QUIT then should_quit = true;
 
@@ -337,8 +332,6 @@ update_and_draw_frame :: () -> bool {
             if ofs != 0 {
                 main_font.pixel_height += ofs;
                 main_font.pixel_height = max(main_font.pixel_height, 1);
-                reload_main_font();
-                request_redraw(tprint("scroll at %", #line));
             }
         }
 
@@ -407,6 +400,19 @@ update_and_draw_frame :: () -> bool {
             Profile();
         }
     }
+
+    if main_font.pixel_height != old_main_font_pixel_height {
+        old_scale := 1 / cast(float) main_font.line_height;
+
+        reload_main_font();
+
+        new_scale := 1 / cast(float) main_font.line_height;
+        target_scroll_rows -= (text_pane_rect.top - mouse.y) * (new_scale - old_scale);
+        scroll_rows = target_scroll_rows;
+
+        request_redraw(tprint("scroll at %", #line));
+    }
+
     // update vertical scroll
     scroll_rows = lerp(scroll_rows, target_scroll_rows, scroll_rows_lerp_factor);
     if abs(scroll_rows - target_scroll_rows) < 0.001 then scroll_rows = target_scroll_rows;
