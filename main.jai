@@ -1104,9 +1104,9 @@ draw_the_text_pane :: (buffer: *Log_Text_Buffer, rect: Rectangle) {
         for first_line..last_line {
             info := *buffer.line_infos[it];
             if info.source_id == SOURCE_ID_UNKNOWN continue;
-            if info.time_stamp.year == 0 continue;
+            if info.timestamp.year == 0 continue;
 
-            time := calendar_to_apollo(info.time_stamp);
+            time := calendar_to_apollo(info.timestamp);
 
             if it == hover_line_index then global_time_current_line = time;
 
@@ -1134,15 +1134,15 @@ draw_the_text_pane :: (buffer: *Log_Text_Buffer, rect: Rectangle) {
         W := width(rect) - line_width;
         x_prev := cast(float) left(rect) + line_width / 2.0;
         y_prev := y_top;
-        seen_time_stamp := false;
+        seen_timestamp := false;
         for line_index: first_line..last_line {
             y := y_top - line_index * h;
 
             info := *buffer.line_infos[line_index];
             if info.source_id == SOURCE_ID_UNKNOWN continue;
-            if info.time_stamp.year == 0 continue;
+            if info.timestamp.year == 0 continue;
 
-            time := calendar_to_apollo(info.time_stamp);
+            time := calendar_to_apollo(info.timestamp);
             time_adjusted := time - time_range_min;
             adjusted_seconds := to_float64_seconds(time_adjusted);
             t := adjusted_seconds / time_range;
@@ -1151,9 +1151,9 @@ draw_the_text_pane :: (buffer: *Log_Text_Buffer, rect: Rectangle) {
 
             x := cast(float, left(rect) + line_width / 2.0 + W * t);
 
-            if !seen_time_stamp {
+            if !seen_timestamp {
                 x_prev, y_prev = x, y;
-                seen_time_stamp = true;
+                seen_timestamp = true;
             }
 
             draw_fat_line(.{x_prev, y_prev}, .{x, y}, line_width, color);
@@ -1495,23 +1495,43 @@ remove_line_range :: (using buffer: *Log_Text_Buffer, first_line: s64, last_line
 // log line info stuff
 //
 
+// TODO split this struct into 2: one with common info and one with extra info
 Log_Line_Info :: struct {
     line_offset: s64;
-    time_stamp: Calendar_Time;
-    source_id: u8 = SOURCE_ID_UNKNOWN;
-    source_start: u8;
+    timestamp: Calendar_Time;
     pid: s32 = -1;
-    thread_name_offset: u8 = THREAD_NAME_UNKNOWN;
     fiber_id: s16;
     fiber_name_offset: s16 = -1;
-    module_name_offset: u8 = MODULE_NAME_UNKNOWN;
-    log_level: u8;
+
     escape_codes_start: s16;
     escape_codes_count: s16;
+
+    source_id: u8 = SOURCE_ID_UNKNOWN;
+    thread_name_offset: u8 = THREAD_NAME_UNKNOWN;
+    module_name_offset: u8 = MODULE_NAME_UNKNOWN;
+    log_level: u8;
+
+    source_start: u8;
+    pid_start: u8;
+    pid_count: u8;
+    thread_name_start: u8;
+    fiber_id_start: u8;
+    fiber_name_start: u8;
 }
 
 THREAD_NAME_UNKNOWN :: 0xff;
 MODULE_NAME_UNKNOWN :: 0xff;
+
+Log_Info_Piece_Type :: enum {
+    SOURCE;
+    PID;
+    THREAD_NAME;
+    FIBER_ID;
+    FIBER_NAME;
+    MODULE;
+    SOURCE_LOCATION;
+    LOG_LEVEL;
+}
 
 parse_log_line :: (buffer: *Log_Text_Buffer, line: string, info: *Log_Line_Info) -> bool {
     cursor := 0;
@@ -1551,8 +1571,8 @@ parse_log_line :: (buffer: *Log_Text_Buffer, line: string, info: *Log_Line_Info)
     // parse time stamp
     //
 
-    time_stamp_start := cursor;
-    time_stamp, status, tail := parse_date_time_stamp(advance(line, cursor));
+    timestamp_start := cursor;
+    timestamp, status, tail := parse_date_timestamp(advance(line, cursor));
     if status != .FULL {
         source_is_not_number := false;
         for source if !inline is_digit(it) { source_is_not_number = true; break; }
@@ -1576,7 +1596,7 @@ parse_log_line :: (buffer: *Log_Text_Buffer, line: string, info: *Log_Line_Info)
 
     cursor = ifx tail then tail.data - line.data else line.count;
 
-    info.time_stamp = time_stamp;
+    info.timestamp = timestamp;
 
     //
     // parse pid
@@ -1893,9 +1913,19 @@ update_text_buffer_search_results :: (using buffer: *Log_Text_Buffer, search_str
 
     if !search_string return;
 
+    query, do_query := parse_search_string(search_string);
+
     search_string_lowercase := to_lower_copy(search_string,, temp);
     for search_string if is_alpha(it) { search_results.case_insensitive = true; break; }
 
+    if do_query {
+
+    } else {
+        do_text_search(buffer, search_string_lowercase, *search_results.matches, search_results.case_insensitive);
+    }
+}
+
+do_text_search :: (buffer: *Log_Text_Buffer, search_string_lowercase: string, matches: *[..] Search_Match_Info, $$case_insensitive: bool) {
     next_range_cursor := 0;
 
     for line_index: 0..buffer.line_infos.count - 1 {
@@ -1903,8 +1933,8 @@ update_text_buffer_search_results :: (using buffer: *Log_Text_Buffer, search_str
         if !line continue;
 
         offset := 0;
-        if search_results.case_insensitive then offset = search_for_match_case_insensitive(line, search_string_lowercase);
-                                           else offset = search_for_match_case_sensitive(line, search_string_lowercase);
+        if case_insensitive then offset = search_for_match_case_insensitive(line, search_string_lowercase);
+                            else offset = search_for_match_case_sensitive(line, search_string_lowercase);
 
         source_id := SOURCE_ID_UNKNOWN;
         while next_range_cursor < buffer.log_ranges_of_source.count {
@@ -1918,10 +1948,152 @@ update_text_buffer_search_results :: (using buffer: *Log_Text_Buffer, search_str
 
         if offset >= 0 {
             assert(offset <= S16_MAX, "%", offset);
-            array_add(*search_results.matches, Search_Match_Info.{ xx line_index, xx offset, source_id });
+            array_add(matches, Search_Match_Info.{ xx line_index, xx offset, source_id });
         }
     }
-    // FIXME: ignoring the last line for now, cause i'm lazy
+}
+
+Search_Query :: struct {
+    type: Log_Info_Piece_Type;
+    value: string;
+}
+
+do_query_search :: (buffer: *Log_Text_Buffer, query: Search_Query, matches: *[..] Search_Match_Info) {
+    numeric_value := 0;
+    if query.type == .PID || query.type == .FIBER_ID {
+        numeric_value = parse_positive_number(query.value, s32);
+        if !numeric_value return;
+    }
+
+    for * info, line_index: buffer.line_infos {
+        if info.source_id == SOURCE_ID_UNKNOWN continue;
+
+        offset := -1;
+        if #complete query.type == {
+            case .SOURCE;
+                find_index_from_left(buffer.all_log_sources[info.source_id], query.value);
+                offset = info.source_start;
+            case .PID;
+                if info.pid != numeric_value continue;
+                offset = info.pid_start;
+            case .THREAD_NAME;
+            case .FIBER_ID;
+            case .FIBER_NAME;
+            case .MODULE;
+            case .SOURCE_LOCATION;
+            case .LOG_LEVEL;
+        }
+
+        if offset == -1 continue;
+    }
+}
+
+parse_search_string :: (text: string) -> Search_Query, ok: bool {
+    cursor := 0;
+
+    // skip spaces
+    while (cursor < text.count) && (inline is_space(text[cursor])) cursor += 1;
+    if cursor == text.count return .{}, false;
+
+    if cursor != #char "$" return .{}, false;
+
+    type_start := cursor;
+    while cursor < text.count {
+        c := text[cursor];
+        if !inline is_alnum(c) break;
+        cursor += 1;
+    }
+    if cursor == text.count return .{}, false;
+    if cursor == type_start return .{}, false;
+
+    result: Search_Query;
+
+    type_string := slice(text, type_start, cursor - type_start);
+    if type_string == {
+        case "source";          result.type = .SOURCE;
+        case "pid";             result.type = .PID;
+        case "thread_name";     result.type = .THREAD_NAME;
+        case "fiber_id";        result.type = .FIBER_ID;
+        case "fiber_name";      result.type = .FIBER_NAME;
+        case "module";          result.type = .MODULE;
+        case "source_location"; result.type = .SOURCE_LOCATION;
+        case "log_level";       result.type = .LOG_LEVEL;
+        case; log_error("unknown log info type `%`", type_string); return .{}, false;
+    }
+
+    // skip spaces
+    while (cursor < text.count) && (inline is_space(text[cursor])) cursor += 1;
+    if cursor == text.count return .{}, false;
+
+    if text[cursor] != #char "=" return .{}, false;
+    cursor += 1;
+
+    // skip spaces
+    while (cursor < text.count) && (inline is_space(text[cursor])) cursor += 1;
+    if cursor == text.count return .{}, false;
+
+    if text[cursor] == #char "\"" {
+        value, ok := parse_string_literal(advance(text, cursor),, temp);
+        if !ok return .{}, false;
+        result.value = value;
+    } else {
+        value_start := cursor;
+        // skip until space
+        while (cursor < text.count) && (!inline is_space(text[cursor])) cursor += 1;
+        if cursor == value_start return .{}, false;
+        result.value = slice(text, value_start, cursor);
+    }
+
+    return result, true;
+}
+
+parse_string_literal :: (input: string) -> string, ok: bool {
+    read_cursor := 0;
+    if input[read_cursor] != #char "\"" return "", false;
+    read_cursor += 1;
+
+    result: string;
+    result.data = alloc(input.count);
+    result.count = input.count;
+    write_cursor := 0;
+
+    success := false;
+    defer if !success free(result);
+
+    while read_cursor < input.count {
+        c := input[read_cursor]; read_cursor += 1;
+
+        if c == #char "\"" { success = true; break; }
+
+        if c != #char "\\" {
+            result[write_cursor] = c; write_cursor += 1; continue;
+        }
+        read_cursor += 1;
+        c = input[read_cursor]; read_cursor += 1;
+
+        if c == #char "\\" || c == #char "\"" {
+            result[write_cursor] = c; write_cursor += 1; continue;
+        }
+
+        if c == {
+            case #char "e"; result[write_cursor] = #char "\e"; write_cursor += 1; continue;
+            case #char "n"; result[write_cursor] = #char "\n"; write_cursor += 1; continue;
+            case #char "r"; result[write_cursor] = #char "\r"; write_cursor += 1; continue;
+            case #char "t"; result[write_cursor] = #char "\t"; write_cursor += 1; continue;
+        }
+
+        if c == #char "x" {
+            if read_cursor > input.count - 2 { return "", false; }
+            l := input[read_cursor]; read_cursor += 1;
+            h := input[read_cursor]; read_cursor += 1;
+
+            result[write_cursor] = l << 4 + h; write_cursor += 1; continue;
+        }
+
+    }
+
+    result.count = write_cursor;
+    return result, true;
 }
 
 search_for_match_case_sensitive :: (line: string, search_string: string, $max_offset: int = S16_MAX, $do_assert := false) -> s64 {
@@ -3826,7 +3998,7 @@ Parse_Date_Time_Result :: enum_flags {
     DATE; TIME; MILLISECONDS;
     FULL :: DATE | TIME | MILLISECONDS;
 }
-parse_date_time_stamp :: (input: string) -> (Calendar_Time, Parse_Date_Time_Result, tail: string) {
+parse_date_timestamp :: (input: string) -> (Calendar_Time, Parse_Date_Time_Result, tail: string) {
     _0 :: #char "0";
 
     result: Calendar_Time;
@@ -3972,12 +4144,12 @@ parse_date_time_stamp :: (input: string) -> (Calendar_Time, Parse_Date_Time_Resu
     return result, status, tail;
 }
 
-test_parse_date_time_stamp :: () {
+test_parse_date_timestamp :: () {
     line: string;
 
     {
         line = "2025:02:26 17:05:33.047 tail";
-        date_time, status, tail := parse_date_time_stamp(line);
+        date_time, status, tail := parse_date_timestamp(line);
         assert(status == .FULL);
         assert(date_time.year == 2025);
         assert(date_time.month_starting_at_0 == 1);
@@ -3992,7 +4164,7 @@ test_parse_date_time_stamp :: () {
 
     {
         line = "  2003:03:13 no time?";
-        date_time, status, tail := parse_date_time_stamp(line);
+        date_time, status, tail := parse_date_timestamp(line);
         assert(status == .DATE);
         assert(date_time.year == 2003);
         assert(date_time.month_starting_at_0 == 2);
@@ -4007,7 +4179,7 @@ test_parse_date_time_stamp :: () {
 
     {
         line = "1993:05:19 12:30:00 not accurate enough!";
-        date_time, status, tail := parse_date_time_stamp(line);
+        date_time, status, tail := parse_date_timestamp(line);
         assert(status == .DATE | .TIME);
         assert(date_time.year == 1993);
         assert(date_time.month_starting_at_0 == 4);
@@ -4022,7 +4194,7 @@ test_parse_date_time_stamp :: () {
 
     {
         line = "  garbage!";
-        date_time, status, tail := parse_date_time_stamp(line);
+        date_time, status, tail := parse_date_timestamp(line);
         assert(status == 0);
         assert(date_time.year == 0);
         assert(date_time.month_starting_at_0 == 0);
@@ -4037,7 +4209,7 @@ test_parse_date_time_stamp :: () {
 
     {
         line = "";
-        date_time, status, tail := parse_date_time_stamp(line);
+        date_time, status, tail := parse_date_timestamp(line);
         assert(status == 0);
         assert(date_time.year == 0);
         assert(date_time.month_starting_at_0 == 0);
@@ -4052,7 +4224,7 @@ test_parse_date_time_stamp :: () {
 
     {
         line = "   \t  \n  \r ";
-        date_time, status, tail := parse_date_time_stamp(line);
+        date_time, status, tail := parse_date_timestamp(line);
         assert(status == 0);
         assert(date_time.year == 0);
         assert(date_time.month_starting_at_0 == 0);
@@ -4430,7 +4602,7 @@ run_tests :: () {
     log("test_search_for_match");          test_search_for_match();
     log("test_array_insert_at");           test_array_insert_at();
     log("test_quick_sort");                test_quick_sort();
-    log("test_parse_date_time_stamp");     test_parse_date_time_stamp();
+    log("test_parse_date_timestamp");     test_parse_date_timestamp();
     elapsed := seconds_since_init() - t0;
     log("\e[32mtests passed!\e[0m elapsed %", fmt(elapsed, 3));
 }
