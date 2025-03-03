@@ -784,7 +784,6 @@ update_and_draw_frame :: () -> bool {
         elapsed := seconds_since_init() - t0;
         print(*builder, "% %\n", frame_counter, fmt(elapsed, 6));
         print(*builder, "scroll: %, %\n", fmt(scroll_columns, 1), fmt(scroll_rows, 1));
-        print(*builder, "num sources: %\n", the_text_buffer.all_log_sources.count);
         if the_text_search_ui.flags & .OPEN print(*builder, "search matches: %\n", search_results.matches.count);
         if hovered_scroll_bar_anchor_index != -1 then print(*builder, "% %\n", hovered_scroll_bar_anchor_kind, hovered_scroll_bar_anchor_index);
         print(*builder, "t min: ");
@@ -799,6 +798,14 @@ update_and_draw_frame :: () -> bool {
         if global_time_range_max != APOLLO_TIME_INVALID then print_time_for_log(*builder, to_calendar(global_time_range_max));
                                                         else print(*builder, "?");
         print(*builder, "\n");
+
+        if the_text_search_ui.completions.values {
+            print(*builder, "matched prefix: %\n", the_text_search_ui.completions.matched_prefix_length);
+        }
+        for the_text_search_ui.completions.values {
+            print(*builder, "%\n", it);
+        }
+
         for redraw_reasons print(*builder, "%\n", it);
 
         pane_text := builder_to_string(*builder,, temp);
@@ -2021,7 +2028,7 @@ update_text_buffer_search_results :: (using buffer: *Log_Text_Buffer, search_str
     search_string_lowercase := to_lower_copy(search_string,, temp);
     for search_string if is_alpha(it) { search_results.case_insensitive = true; break; }
 
-    if do_query && query.value != "" {
+    if do_query {
         search_results.flags |= .STRUCTURED_QUERY;
         do_query_search(buffer, query, *search_results.matches);
     } else {
@@ -2066,7 +2073,8 @@ Search_Query :: struct {
 
 do_query_search :: (buffer: *Log_Text_Buffer, query: Search_Query, matches: *[..] Search_Match_Info) {
     numeric_value := 0;
-    if query.type == .PID || query.type == .FIBER_ID {
+    filter_needed := (query.value != "");
+    if filter_needed && (query.type == .PID || query.type == .FIBER_ID) {
         numeric_value = parse_positive_number(query.value, s32);
         if !numeric_value return;
     }
@@ -2079,35 +2087,35 @@ do_query_search :: (buffer: *Log_Text_Buffer, query: Search_Query, matches: *[..
         count: u8 = 0;
         if #complete query.type == {
             case .SOURCE;
-                if !contains(buffer.all_log_sources[info.source_id], query.value) continue;
+                if filter_needed && !contains(buffer.all_log_sources[info.source_id], query.value) continue;
                 offset = info.source_start;
                 count = info.source_count;
             case .PID;
-                if info.pid != numeric_value continue;
+                if filter_needed && info.pid != numeric_value continue;
                 offset = info.pid_start;
                 count = info.pid_count;
             case .THREAD_NAME;
-                if !contains(buffer.all_thread_names[info.thread_name_offset], query.value) continue;
+                if filter_needed && !contains(buffer.all_thread_names[info.thread_name_offset], query.value) continue;
                 offset = info.thread_name_start;
                 count = info.thread_name_count;
             case .FIBER_ID;
-                if info.fiber_id != numeric_value continue;
+                if filter_needed && info.fiber_id != numeric_value continue;
                 offset = info.fiber_id_start;
                 count = info.fiber_id_count;
             case .FIBER_NAME;
-                if !contains(buffer.all_fiber_names[info.fiber_name_offset], query.value) continue;
+                if filter_needed && !contains(buffer.all_fiber_names[info.fiber_name_offset], query.value) continue;
                 offset = info.fiber_name_start;
                 count = info.fiber_name_count;
             case .MODULE;
-                if !contains(buffer.all_module_names[info.module_name_offset], query.value) continue;
+                if filter_needed && !contains(buffer.all_module_names[info.module_name_offset], query.value) continue;
                 offset = info.module_name_start;
                 count = info.module_name_count;
             case .SOURCE_LOCATION;
-                if !contains(buffer.all_source_locations[info.location_offset], query.value) continue;
+                if filter_needed && !contains(buffer.all_source_locations[info.location_offset], query.value) continue;
                 offset = info.location_start;
                 count = info.location_count;
             case .LOG_LEVEL;
-                if info.log_level != query.value[0] continue;
+                if filter_needed && info.log_level != query.value[0] continue;
                 offset = info.log_level_start;
                 count = 1;
         }
@@ -2133,8 +2141,6 @@ parse_search_string :: (text: string, buffer: *Log_Text_Buffer = null) -> Search
         if !inline is_alnum(c) break;
         cursor += 1;
     }
-    if cursor == text.count return .{}, false, .{};
-    if cursor == type_start return .{}, false, .{};
 
     result: Search_Query;
 
@@ -2170,7 +2176,10 @@ parse_search_string :: (text: string, buffer: *Log_Text_Buffer = null) -> Search
 
     // skip spaces
     while (cursor < text.count) && (inline is_space(text[cursor])) cursor += 1;
-    if cursor == text.count return .{}, false, .{};
+
+    all_values := ifx buffer then get_all_entities_of_type(buffer, result.type);
+
+    if cursor == text.count return result, true, .{all_values, 0};
 
     if text[cursor] != #char "=" return .{}, false, .{};
     cursor += 1;
@@ -2178,11 +2187,9 @@ parse_search_string :: (text: string, buffer: *Log_Text_Buffer = null) -> Search
     // skip spaces
     while (cursor < text.count) && (inline is_space(text[cursor])) cursor += 1;
 
-    all_variants := ifx buffer then get_all_entities_of_type(buffer, result.type);
-
     // nothing after =, complete every possible entity
     if cursor == text.count {
-        return .{}, false, .{all_variants, 0};
+        return result, true, .{all_values, 0};
     }
 
     if text[cursor] == #char "\"" {
@@ -2198,7 +2205,7 @@ parse_search_string :: (text: string, buffer: *Log_Text_Buffer = null) -> Search
         result.value = slice(text, value_start, cursor - value_start);
 
         array_reset_keeping_memory(*completions);
-        for all_variants {
+        for all_values {
             if !starts_with(it, result.value) continue;
 
             array_add(*completions, it,, temp);
@@ -2454,7 +2461,9 @@ Text_Search_UI :: struct {
     text_input: Text_Input_State;
     text_input.max_length = MAX_SEARCH_STRING_LENGTH;
 
+    // strings owned by `completions_storage`
     completions: Completions;
+    completions_pool: Pool;
 }
 the_text_search_ui: Text_Search_UI;
 
@@ -2483,9 +2492,9 @@ text_search_ui_handle_input_event :: (event: Input.Event) -> handled: bool {
     status := text_input_handle_event(*text_input, event, completions);
     if !status return false;
 
-    new_completions: Completions;
     if status & .TEXT_CHANGED {
-        new_completions = update_text_buffer_search_results(*the_text_buffer, xx text_input.buffer);
+        new_completions := update_text_buffer_search_results(*the_text_buffer, xx text_input.buffer);
+        save_completions(*the_text_search_ui, new_completions);
     }
 
     if status & .ENTER_HIT {
@@ -2500,6 +2509,19 @@ text_search_ui_handle_input_event :: (event: Input.Event) -> handled: bool {
     request_redraw("text search ui update");
 
     return xx status;
+}
+
+save_completions :: (ui: *Text_Search_UI, new_completions: Completions) {
+    if !ui.completions_pool.block_allocator.proc then set_allocators(*ui.completions_pool);
+
+    reset(*ui.completions_pool);
+    pool := Allocator.{pool_allocator_proc, *ui.completions_pool};
+
+    ui.completions.matched_prefix_length = new_completions.matched_prefix_length;
+    ui.completions.values = NewArray(new_completions.values.count, string,, pool);
+    for new_completions.values {
+        ui.completions.values[it_index] = copy_string(it,, pool);
+    }
 }
 
 jump_to_next_search_match :: (forwards: bool) {
@@ -3353,6 +3375,30 @@ text_input_handle_event :: (state: *Text_Input_State, event: Input.Event, comple
                 state.flags |= .SELECTION_ACTIVE;
                 return .HANDLED;
             }
+
+        case .TAB;
+            if completions.values {
+                to_skip := completions.matched_prefix_length;
+                common_prefix := completions.values[0];
+                for item: advance(completions.values, 1) {
+                    if item.count < common_prefix.count {
+                        common_prefix.count = item.count;
+                    }
+                    for common_prefix {
+                        if it == item[it_index] continue;
+                        common_prefix.count = it_index;
+                        break;
+                    }
+                    if common_prefix.count <= to_skip break;
+                }
+                if common_prefix.count > to_skip {
+                    to_append := advance(common_prefix, to_skip);
+                    array_insert_at(*state.buffer, cast([] u8) to_append, state.cursor);
+                    state.cursor += to_append.count;
+                    return .TEXT_CHANGED;
+                }
+            }
+            return .HANDLED;
 
         case .ENTER;
             if event.shift_pressed
@@ -4593,7 +4639,7 @@ array_equals :: (a: [] $T, b: [] T) -> bool {
     return true;
 }
 
-advance :: (array: [] u8, bytes: s64) -> result: [] u8 {
+advance :: inline (array: [] $T, bytes: s64) -> result: [] T {
     assert(array.count >= bytes);
 
     result := array;
