@@ -269,7 +269,7 @@ update_and_draw_frame :: () -> bool {
 
     // text ui info
     {
-        using text_search_ui_rect;
+        using the_text_search_ui.rect;
         left = absolute_left + 100;
         top = absolute_bottom + 60;
         width = 800;
@@ -306,9 +306,6 @@ update_and_draw_frame :: () -> bool {
                 close_popup_text_input(*the_popup_text_input);
             }
 
-            // if text_search_ui_active && !axis_aligned_rectangle_contains(text_search_ui_rect, mouse) {
-            //     text_search_ui_active = false;
-            // }
         } else if draggin_scroll_bar && it.key_code == .MOUSE_BUTTON_LEFT && !it.key_pressed {
             request_redraw("stopped draggin scroll bar");
         } else if it.key_code == .MOUSE_BUTTON_RIGHT && it.key_pressed {
@@ -361,9 +358,8 @@ update_and_draw_frame :: () -> bool {
             request_redraw(tprint("scroll at %", #line));
         }
 
-        else if it.key_code == xx #char "F" && it.ctrl_pressed && !text_search_ui_open {
+        else if it.key_code == xx #char "F" && it.ctrl_pressed && !(the_text_search_ui.flags & .OPEN) {
             open_text_search_ui();
-            // text_search_ui_active = true;
             request_redraw("open search ui");
         }
 
@@ -380,7 +376,7 @@ update_and_draw_frame :: () -> bool {
             if handled continue;
         }
 
-        else if text_search_ui_open {
+        else if the_text_search_ui.flags & .OPEN {
             handled := text_search_ui_handle_input_event(it);
             if handled continue;
         }
@@ -721,7 +717,7 @@ update_and_draw_frame :: () -> bool {
         {
             mouse_in_rect := mouse - .{xx scroll_bar_rect.left, xx bottom(scroll_bar_rect)};
             search_match_index := -1;
-            if text_search_ui_open
+            if the_text_search_ui.flags & .OPEN
                 search_match_index = do_scroll_bar_anchors(scroll_bar_rect, search_results.matches, search_match_color, .DRAW, mouse_in_rect);
             // explicit anchors have higher priority
             explicit_anchor_index := do_scroll_bar_anchors(scroll_bar_rect, explicit_anchors, anchor_button_active_color, .DRAW, mouse_in_rect, t=15);
@@ -761,8 +757,8 @@ update_and_draw_frame :: () -> bool {
             draw_hollow_axis_aligned_rectangle(xx (x + x_pad - 1), y, xx (w - 2 * x_pad), xx h, 2, color);
         }
 
-        if text_search_ui_open {
-            handled := draw_text_search_ui(text_search_ui_rect, main_font, handle_click=!mouse_event_handled);
+        if the_text_search_ui.flags & .OPEN {
+            handled := draw_text_search_ui(*the_text_search_ui, main_font, handle_click=!mouse_event_handled);
             mouse_event_handled ||= handled;
         }
     }
@@ -789,10 +785,8 @@ update_and_draw_frame :: () -> bool {
         print(*builder, "% %\n", frame_counter, fmt(elapsed, 6));
         print(*builder, "scroll: %, %\n", fmt(scroll_columns, 1), fmt(scroll_rows, 1));
         print(*builder, "num sources: %\n", the_text_buffer.all_log_sources.count);
-        // if text_search_ui_open print(*builder, "cursor: %\n", text_input_cursor);
-        if text_search_ui_open print(*builder, "search matches: %\n", search_results.matches.count);
+        if the_text_search_ui.flags & .OPEN print(*builder, "search matches: %\n", search_results.matches.count);
         if hovered_scroll_bar_anchor_index != -1 then print(*builder, "% %\n", hovered_scroll_bar_anchor_kind, hovered_scroll_bar_anchor_index);
-        // if text_search_ui_open print(*builder, "case-insensitive: %\n", search_results.case_insensitive);
         print(*builder, "t min: ");
         if global_time_range_min != APOLLO_TIME_INVALID then print_time_for_log(*builder, to_calendar(global_time_range_min));
                                                         else print(*builder, "?");
@@ -1087,7 +1081,7 @@ draw_the_text_pane :: (buffer: *Log_Text_Buffer, rect: Rectangle) {
             }
 
             // handle search match
-            if text_search_ui_open
+            if the_text_search_ui.flags & .OPEN
                 // TODO @INCOMPLETE draw all matches, not just the first ones
                 draw_search_match_border(rect, main_font, text_x_tweak, y, line_index, *search_matches_cursor);
 
@@ -1581,7 +1575,7 @@ get_all_entities_of_type :: (buffer: *Log_Text_Buffer, type: Log_Info_Piece_Type
         case .FIBER_NAME;       return buffer.all_fiber_names;
         case .MODULE;           return buffer.all_module_names;
         case .SOURCE_LOCATION;  return buffer.all_source_locations;
-        case .LOG_LEVEL;        return buffer.all_log_levels;
+        case .LOG_LEVEL;
             result: [..] string;
             array_reserve(*result, buffer.all_log_levels.count,, temp);
             for buffer.all_log_levels {
@@ -2008,7 +2002,7 @@ search_match_color :: #run hex_color("f5a511");
 
 search_results: Search_Results;
 
-update_text_buffer_search_results :: (using buffer: *Log_Text_Buffer, search_string: string) -> completions: [] string {
+update_text_buffer_search_results :: (using buffer: *Log_Text_Buffer, search_string: string) -> completions: Completions {
     assert(search_string.count < search_results.search_string_storage.count, "%", search_string.count);
     memcpy(search_results.search_string_storage.data, search_string.data, search_string.count);
     search_results.search_string_storage[search_string.count] = 0; // XXX I don't really need this...
@@ -2020,9 +2014,9 @@ update_text_buffer_search_results :: (using buffer: *Log_Text_Buffer, search_str
     array_reset_keeping_memory(*search_results.matches);
     search_results.case_insensitive = false;
 
-    if !search_string return .[];
+    if !search_string return .{};
 
-    query, do_query, completions := parse_search_string(search_string);
+    query, do_query, completions := parse_search_string(search_string, buffer);
 
     search_string_lowercase := to_lower_copy(search_string,, temp);
     for search_string if is_alpha(it) { search_results.case_insensitive = true; break; }
@@ -2123,14 +2117,14 @@ do_query_search :: (buffer: *Log_Text_Buffer, query: Search_Query, matches: *[..
     }
 }
 
-parse_search_string :: (text: string) -> Search_Query, ok: bool, completions: [] string {
+parse_search_string :: (text: string, buffer: *Log_Text_Buffer = null) -> Search_Query, ok: bool, completions: Completions {
     cursor := 0;
 
     // skip spaces
     while (cursor < text.count) && (inline is_space(text[cursor])) cursor += 1;
-    if cursor == text.count return .{}, false, .[];
+    if cursor == text.count return .{}, false, .{};
 
-    if text[cursor] != #char "$" return .{}, false, .[];
+    if text[cursor] != #char "$" return .{}, false, .{};
     cursor += 1;
 
     type_start := cursor;
@@ -2139,8 +2133,8 @@ parse_search_string :: (text: string) -> Search_Query, ok: bool, completions: []
         if !inline is_alnum(c) break;
         cursor += 1;
     }
-    if cursor == text.count return .{}, false, .[];
-    if cursor == type_start return .{}, false, .[];
+    if cursor == text.count return .{}, false, .{};
+    if cursor == type_start return .{}, false, .{};
 
     result: Search_Query;
 
@@ -2155,7 +2149,7 @@ parse_search_string :: (text: string) -> Search_Query, ok: bool, completions: []
         .{.LOG_LEVEL,       "log_level"},
     ];
 
-    completions: [] string;
+    completions: [..] string;
     completions.allocator = temp;
 
     type_string := slice(text, type_start, cursor - type_start);
@@ -2172,28 +2166,28 @@ parse_search_string :: (text: string) -> Search_Query, ok: bool, completions: []
         }
     }
 
-    if !match return .{}, false, completions;
+    if !match return .{}, false, .{completions, type_string.count};
 
     // skip spaces
     while (cursor < text.count) && (inline is_space(text[cursor])) cursor += 1;
-    if cursor == text.count return .{}, false, .[];
+    if cursor == text.count return .{}, false, .{};
 
-    if text[cursor] != #char "=" return .{}, false, .[];
+    if text[cursor] != #char "=" return .{}, false, .{};
     cursor += 1;
 
     // skip spaces
     while (cursor < text.count) && (inline is_space(text[cursor])) cursor += 1;
 
-    all_variants := get_all_entities_of_type(result.type);
+    all_variants := ifx buffer then get_all_entities_of_type(buffer, result.type);
 
     // nothing after =, complete every possible entity
     if cursor == text.count {
-        return .{}, false, all_variants;
+        return .{}, false, .{all_variants, 0};
     }
 
     if text[cursor] == #char "\"" {
         value, ok := parse_string_literal(advance(text, cursor),, temp);
-        if !ok return .{}, false, .[];
+        if !ok return .{}, false, .{};
         result.value = value;
     } else {
         value_start := cursor;
@@ -2211,7 +2205,7 @@ parse_search_string :: (text: string) -> Search_Query, ok: bool, completions: []
         }
     }
 
-    return result, true, completions;
+    return result, true, .{completions, result.value.count};
 }
 
 parse_string_literal :: (input: string) -> string, ok: bool {
@@ -2453,12 +2447,16 @@ load_font :: (name: string, font: *My_Dynamic_Font) {
 // text search ui
 //
 
-// TODO make it a struct
-text_search_ui_open := false;
-text_search_ui_active := false;
-text_search_builder: String_Builder;
-text_search_string: string;
-text_search_ui_rect: Rectangle;
+Text_Search_UI :: struct {
+    rect: Rectangle;
+    flags: enum_flags { OPEN; };
+
+    text_input: Text_Input_State;
+    text_input.max_length = MAX_SEARCH_STRING_LENGTH;
+
+    completions: Completions;
+}
+the_text_search_ui: Text_Search_UI;
 
 text_search_ui_background_color :: ui_element_background_color;
 text_search_ui_border_color     :: ui_element_border_color;
@@ -2466,24 +2464,28 @@ text_search_ui_cursor_color     :: ui_element_cursor_color;
 text_search_ui_text_color       :: ui_element_text_color;
 text_search_ui_border_width :: 3.0;
 
-text_search_input := Text_Input_State.{
-    max_length = MAX_SEARCH_STRING_LENGTH,
-};
-
 open_text_search_ui :: () {
-    text_search_ui_open = true;
+    the_text_search_ui.flags |= .OPEN;
 }
 
 close_text_search_ui :: () {
-    text_search_ui_open = false;
+    the_text_search_ui.flags &= ~.OPEN;
+}
+
+Completions :: struct {
+    values: [] string;
+    matched_prefix_length: int;
 }
 
 text_search_ui_handle_input_event :: (event: Input.Event) -> handled: bool {
-    status := text_input_handle_event(*text_search_input, event);
+    using the_text_search_ui;
+
+    status := text_input_handle_event(*text_input, event, completions);
     if !status return false;
 
+    new_completions: Completions;
     if status & .TEXT_CHANGED {
-        update_text_buffer_search_results(*the_text_buffer, xx text_search_input.buffer);
+        new_completions = update_text_buffer_search_results(*the_text_buffer, xx text_input.buffer);
     }
 
     if status & .ENTER_HIT {
@@ -2528,7 +2530,7 @@ jump_to_next_search_match :: (forwards: bool) {
     }
 }
 
-draw_text_search_ui :: (rect: Rectangle, font: My_Dynamic_Font, handle_click: bool) -> click_handled: bool {
+draw_text_search_ui :: (using ui: *Text_Search_UI, font: My_Dynamic_Font, handle_click: bool) -> click_handled: bool {
     draw_axis_aligned_rectangle(rect, text_search_ui_background_color);
     draw_hollow_axis_aligned_rectangle(xx rect.left, xx bottom(rect), xx rect.width, xx rect.height,
                                        border = text_search_ui_border_width, text_search_ui_border_color);
@@ -2539,7 +2541,7 @@ draw_text_search_ui :: (rect: Rectangle, font: My_Dynamic_Font, handle_click: bo
     text_x := rect.left + text_x_tweak;
     text_y := bottom(rect) + text_y_tweak;
 
-    click_handled := draw_text_input(*text_search_input, rect, text_x, text_y, font.regular, text_search_ui_text_color, handle_click);
+    click_handled := draw_text_input(*text_input, rect, text_x, text_y, font.regular, text_search_ui_text_color, handle_click);
 
     // do buttons
     if search_results.matches {
@@ -3186,7 +3188,7 @@ reset_text_input :: (state: *Text_Input_State) {
     state.click_streak = 0;
 }
 
-text_input_handle_event :: (state: *Text_Input_State, event: Input.Event) -> result: Text_Input_Status {
+text_input_handle_event :: (state: *Text_Input_State, event: Input.Event, completions := Completions.{}) -> result: Text_Input_Status {
     if !event.key_pressed return 0;
     if event.alt_pressed return 0;
 
