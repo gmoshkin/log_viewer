@@ -4,6 +4,9 @@ EXE_NAME :: "log_viewer";
 
 TODO:
 
+- context menu on text line:
+    - copy line to clipboard
+
 - when drawing text pane do 2 passes
     - first draw background colors
     - here can draw the time graph and other middle-ground stuff
@@ -1045,6 +1048,7 @@ draw_the_text_pane :: (buffer: *Log_Text_Buffer, rect: Rectangle) {
             // if line_index % 2 == 0
             //     draw_axis_aligned_rectangle(xx x, xx y, xx rect.width, xx main_font.line_height, hex_color("005050"));
 
+            // draw the actual text
             if xx line.count > scroll_columns {
                 font := main_font.regular;
                 if line_index == hover_line_index {
@@ -1069,6 +1073,7 @@ draw_the_text_pane :: (buffer: *Log_Text_Buffer, rect: Rectangle) {
                 }
             }
 
+            // draw anchored line highlight
             anchored := get_anchor_at_line_index(line_index) != -1;
             if anchored {
                 w := rect.width;
@@ -1327,6 +1332,9 @@ Log_Text_Buffer :: struct {
     merged_log_sources: [..] Merge_Info;
     log_ranges_of_source: [..] Log_Range;
 
+    all_pids: [..] s32;
+    all_fiber_ids: [..] s32;
+
     // string owned by `all_text`
     all_thread_names: [..] string;
     // string owned by `all_text`
@@ -1335,6 +1343,8 @@ Log_Text_Buffer :: struct {
     all_module_names: [..] string;
     // string owned by `all_text`
     all_source_locations: [..] string;
+
+    all_log_levels: [..] u8;
 
     escape_code_infos: [..] Escape_Code_Info;
 }
@@ -1350,6 +1360,14 @@ reset_text_buffer :: (using buffer: *Log_Text_Buffer) {
     table_reset(*sources_to_pid);
     array_reset_keeping_memory(*merged_log_sources);
     array_reset_keeping_memory(*log_ranges_of_source);
+
+    array_reset_keeping_memory(*all_thread_names);
+    array_reset_keeping_memory(*all_fiber_names);
+    array_reset_keeping_memory(*all_module_names);
+    array_reset_keeping_memory(*all_source_locations);
+
+    array_reset_keeping_memory(*all_pids);
+    array_reset_keeping_memory(*all_fiber_ids);
 
     array_reset_keeping_memory(*escape_code_infos);
 }
@@ -1546,6 +1564,35 @@ Log_Info_Piece_Type :: enum {
     LOG_LEVEL;
 }
 
+get_all_entities_of_type :: (buffer: *Log_Text_Buffer, type: Log_Info_Piece_Type) -> [] string {
+    if #complete type == {
+        case .SOURCE;           return buffer.all_log_sources;
+        case .PID;
+            result: [..] string;
+            array_reserve(*result, buffer.all_pids.count,, temp);
+            for buffer.all_pids array_add(*result, tprint("%", it));
+            return result;
+        case .THREAD_NAME;      return buffer.all_thread_names;
+        case .FIBER_ID;
+            result: [..] string;
+            array_reserve(*result, buffer.all_fiber_ids.count,, temp);
+            for buffer.all_fiber_ids array_add(*result, tprint("%", it));
+            return result;
+        case .FIBER_NAME;       return buffer.all_fiber_names;
+        case .MODULE;           return buffer.all_module_names;
+        case .SOURCE_LOCATION;  return buffer.all_source_locations;
+        case .LOG_LEVEL;        return buffer.all_log_levels;
+            result: [..] string;
+            array_reserve(*result, buffer.all_log_levels.count,, temp);
+            for buffer.all_log_levels {
+                s := alloc_string(1,, temp);
+                s[0] = it;
+                array_add(*result, s);
+            }
+            return result;
+    }
+}
+
 info_contains :: (info: *Log_Line_Info, piece: Log_Info_Piece_Type) -> bool {
     if #complete piece == {
         case .SOURCE;            return info.source_id != SOURCE_ID_UNKNOWN;
@@ -1658,6 +1705,9 @@ parse_log_line :: (buffer: *Log_Text_Buffer, line: string, info: *Log_Line_Info)
     info.pid = pid;
     info.pid_start = xx pid_start;
     info.pid_count = xx pid_count;
+
+    array_add_if_unique(*buffer.all_pids, pid);
+
     already_seen := false;
     for table_find_multiple(*buffer.sources_to_pid, source) {
         if it == pid {
@@ -1715,6 +1765,8 @@ parse_log_line :: (buffer: *Log_Text_Buffer, line: string, info: *Log_Line_Info)
     info.fiber_id_start = xx fiber_id_start;
     info.fiber_id_count = xx (cursor - fiber_id_start);
 
+    array_add_if_unique(*buffer.all_fiber_ids, fiber_id);
+
     assert(line[cursor] == #char "/"); cursor += 1;
 
     // fiber name
@@ -1758,6 +1810,8 @@ parse_log_line :: (buffer: *Log_Text_Buffer, line: string, info: *Log_Line_Info)
     log_level := line[cursor];
     info.log_level = log_level;
     info.log_level_start = xx cursor;
+    array_add_if_unique(*buffer.all_log_levels, log_level);
+
     cursor += 1;
     assert(line[cursor] == #char ">"); cursor += 1;
 
@@ -1954,7 +2008,7 @@ search_match_color :: #run hex_color("f5a511");
 
 search_results: Search_Results;
 
-update_text_buffer_search_results :: (using buffer: *Log_Text_Buffer, search_string: string) {
+update_text_buffer_search_results :: (using buffer: *Log_Text_Buffer, search_string: string) -> completions: [] string {
     assert(search_string.count < search_results.search_string_storage.count, "%", search_string.count);
     memcpy(search_results.search_string_storage.data, search_string.data, search_string.count);
     search_results.search_string_storage[search_string.count] = 0; // XXX I don't really need this...
@@ -1966,9 +2020,9 @@ update_text_buffer_search_results :: (using buffer: *Log_Text_Buffer, search_str
     array_reset_keeping_memory(*search_results.matches);
     search_results.case_insensitive = false;
 
-    if !search_string return;
+    if !search_string return .[];
 
-    query, do_query := parse_search_string(search_string);
+    query, do_query, completions := parse_search_string(search_string);
 
     search_string_lowercase := to_lower_copy(search_string,, temp);
     for search_string if is_alpha(it) { search_results.case_insensitive = true; break; }
@@ -1979,6 +2033,8 @@ update_text_buffer_search_results :: (using buffer: *Log_Text_Buffer, search_str
     } else {
         do_text_search(buffer, search_string_lowercase, *search_results.matches, search_results.case_insensitive);
     }
+
+    return completions;
 }
 
 do_text_search :: (buffer: *Log_Text_Buffer, search_string_lowercase: string, matches: *[..] Search_Match_Info, $$case_insensitive: bool) {
@@ -2067,14 +2123,14 @@ do_query_search :: (buffer: *Log_Text_Buffer, query: Search_Query, matches: *[..
     }
 }
 
-parse_search_string :: (text: string) -> Search_Query, ok: bool {
+parse_search_string :: (text: string) -> Search_Query, ok: bool, completions: [] string {
     cursor := 0;
 
     // skip spaces
     while (cursor < text.count) && (inline is_space(text[cursor])) cursor += 1;
-    if cursor == text.count return .{}, false;
+    if cursor == text.count return .{}, false, .[];
 
-    if text[cursor] != #char "$" return .{}, false;
+    if text[cursor] != #char "$" return .{}, false, .[];
     cursor += 1;
 
     type_start := cursor;
@@ -2083,48 +2139,79 @@ parse_search_string :: (text: string) -> Search_Query, ok: bool {
         if !inline is_alnum(c) break;
         cursor += 1;
     }
-    if cursor == text.count return .{}, false;
-    if cursor == type_start return .{}, false;
+    if cursor == text.count return .{}, false, .[];
+    if cursor == type_start return .{}, false, .[];
 
     result: Search_Query;
 
+    type_to_name :: (struct { type: Log_Info_Piece_Type; name: string; }).[
+        .{.SOURCE,          "source"},
+        .{.PID,             "pid"},
+        .{.THREAD_NAME,     "thread_name"},
+        .{.FIBER_ID,        "fiber_id"},
+        .{.FIBER_NAME,      "fiber_name"},
+        .{.MODULE,          "module"},
+        .{.SOURCE_LOCATION, "source_location"},
+        .{.LOG_LEVEL,       "log_level"},
+    ];
+
+    completions: [] string;
+    completions.allocator = temp;
+
     type_string := slice(text, type_start, cursor - type_start);
-    if type_string == {
-        case "source";          result.type = .SOURCE;
-        case "pid";             result.type = .PID;
-        case "thread_name";     result.type = .THREAD_NAME;
-        case "fiber_id";        result.type = .FIBER_ID;
-        case "fiber_name";      result.type = .FIBER_NAME;
-        case "module";          result.type = .MODULE;
-        case "source_location"; result.type = .SOURCE_LOCATION;
-        case "log_level";       result.type = .LOG_LEVEL;
-        case; log_error("unknown log info type `%`", type_string); return .{}, false;
+    match := false;
+    for type_to_name {
+        if it.name == type_string {
+            result.type = it.type;
+            match = true;
+            break;
+        }
+
+        if starts_with(it.name, type_string) {
+            array_add(*completions, it.name);
+        }
     }
+
+    if !match return .{}, false, completions;
 
     // skip spaces
     while (cursor < text.count) && (inline is_space(text[cursor])) cursor += 1;
-    if cursor == text.count return .{}, false;
+    if cursor == text.count return .{}, false, .[];
 
-    if text[cursor] != #char "=" return .{}, false;
+    if text[cursor] != #char "=" return .{}, false, .[];
     cursor += 1;
 
     // skip spaces
     while (cursor < text.count) && (inline is_space(text[cursor])) cursor += 1;
-    if cursor == text.count return .{}, false;
+
+    all_variants := get_all_entities_of_type(result.type);
+
+    // nothing after =, complete every possible entity
+    if cursor == text.count {
+        return .{}, false, all_variants;
+    }
 
     if text[cursor] == #char "\"" {
         value, ok := parse_string_literal(advance(text, cursor),, temp);
-        if !ok return .{}, false;
+        if !ok return .{}, false, .[];
         result.value = value;
     } else {
         value_start := cursor;
         // skip until space
         while (cursor < text.count) && (!inline is_space(text[cursor])) cursor += 1;
-        if cursor == value_start return .{}, false;
+        assert(cursor != value_start);
+
         result.value = slice(text, value_start, cursor - value_start);
+
+        array_reset_keeping_memory(*completions);
+        for all_variants {
+            if !starts_with(it, result.value) continue;
+
+            array_add(*completions, it,, temp);
+        }
     }
 
-    return result, true;
+    return result, true, completions;
 }
 
 parse_string_literal :: (input: string) -> string, ok: bool {
