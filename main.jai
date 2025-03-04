@@ -1475,7 +1475,7 @@ process_text_buffer_data :: (using buffer: *Log_Text_Buffer) {
     // }
 
     if search_results.matches {
-        update_text_buffer_search_results(buffer, search_results.search_string);
+        update_search_results(buffer, search_results.search_string);
     }
 }
 
@@ -1592,6 +1592,50 @@ get_all_entities_of_type :: (buffer: *Log_Text_Buffer, type: Log_Info_Piece_Type
             }
             return result;
     }
+}
+
+lookup_log_info :: (buffer: *Log_Text_Buffer, line_index: int, type: Log_Info_Piece_Type) -> string, start: s16, count: u8 {
+    info := *buffer.line_infos[line_index];
+    if #complete type == {
+        case .SOURCE;
+            start := info.source_start;
+            count := info.source_count;
+            return buffer.all_log_sources[info.source_id], start, count;
+        case .THREAD_NAME;
+            start := info.thread_name_start;
+            count := info.thread_name_count;
+            return buffer.all_thread_names[info.thread_name_offset], start, count;
+        case .FIBER_NAME;
+            start := info.fiber_name_start;
+            count: = info.fiber_name_count;
+            return buffer.all_fiber_names[info.fiber_name_offset], start, count;
+        case .MODULE;
+            start := info.module_name_start;
+            count: = info.module_name_count;
+            return buffer.all_module_names[info.module_name_offset], start, count;
+        case .SOURCE_LOCATION;
+            start := info.location_start;
+            count: = info.location_count;
+            return buffer.all_source_locations[info.location_offset], start, count;
+        case .PID;
+            line := get_line(buffer, line_index);
+            start := info.pid_start;
+            count := info.pid_count;
+            return slice(line, start, count), start, count;
+        case .FIBER_ID;
+            line := get_line(buffer, line_index);
+            start := info.fiber_id_start;
+            count := info.fiber_id_count;
+            return slice(line, start, count), start, count;
+        case .LOG_LEVEL;
+            line := get_line(buffer, line_index);
+            start := info.log_level_start;
+            count := 1;
+            return slice(line, start, count), start, xx,no_check count;
+    }
+
+    log_error("entered unreachable code!");
+    return "", 0, 0;
 }
 
 info_contains :: (info: *Log_Line_Info, piece: Log_Info_Piece_Type) -> bool {
@@ -1989,12 +2033,11 @@ log_line_popup_menu_callback :: (menu: *Popup_Menu, event: Popup_Menu.Event) {
 Search_Results :: struct {
     search_string_storage: [MAX_SEARCH_STRING_LENGTH + 1] u8;
     search_string: string;
-    case_insensitive := false;
     matches: [..] Search_Match_Info;
 
     text_buffer: *Log_Text_Buffer;
 
-    flags: enum_flags { STRUCTURED_QUERY; }
+    flags: enum_flags { CASE_INSENSITIVE; STRUCTURED_QUERY; }
 }
 MAX_SEARCH_STRING_LENGTH :: 255;
 
@@ -2009,7 +2052,7 @@ search_match_color :: #run hex_color("f5a511");
 
 search_results: Search_Results;
 
-update_text_buffer_search_results :: (using buffer: *Log_Text_Buffer, search_string: string) -> completions: Completions {
+update_search_results :: (using buffer: *Log_Text_Buffer, search_string: string) -> completions: Completions {
     assert(search_string.count < search_results.search_string_storage.count, "%", search_string.count);
     memcpy(search_results.search_string_storage.data, search_string.data, search_string.count);
     search_results.search_string_storage[search_string.count] = 0; // XXX I don't really need this...
@@ -2019,20 +2062,20 @@ update_text_buffer_search_results :: (using buffer: *Log_Text_Buffer, search_str
 
     search_results.text_buffer = buffer;
     array_reset_keeping_memory(*search_results.matches);
-    search_results.case_insensitive = false;
+    search_results.flags = 0;
 
     if !search_string return .{};
 
     query, do_query, completions := parse_search_string(search_string, buffer);
 
     search_string_lowercase := to_lower_copy(search_string,, temp);
-    for search_string if is_alpha(it) { search_results.case_insensitive = true; break; }
+    for search_string if is_alpha(it) { search_results.flags |= .CASE_INSENSITIVE; break; }
 
     if do_query {
         search_results.flags |= .STRUCTURED_QUERY;
         do_query_search(buffer, query, *search_results.matches);
     } else {
-        do_text_search(buffer, search_string_lowercase, *search_results.matches, search_results.case_insensitive);
+        do_text_search(buffer, search_string_lowercase, *search_results.matches, xx (search_results.flags & .CASE_INSENSITIVE));
     }
 
     return completions;
@@ -2072,54 +2115,19 @@ Search_Query :: struct {
 }
 
 do_query_search :: (buffer: *Log_Text_Buffer, query: Search_Query, matches: *[..] Search_Match_Info) {
-    numeric_value := 0;
     filter_needed := (query.value != "");
-    if filter_needed && (query.type == .PID || query.type == .FIBER_ID) {
-        numeric_value = parse_positive_number(query.value, s32);
-        if !numeric_value return;
-    }
-
     for * info, line_index: buffer.line_infos {
         if !info_contains(info, query.type) continue;
         source_id := info.source_id;
 
-        offset := -1;
-        count: u8 = 0;
-        if #complete query.type == {
-            case .SOURCE;
-                if filter_needed && !contains(buffer.all_log_sources[info.source_id], query.value) continue;
-                offset = info.source_start;
-                count = info.source_count;
-            case .PID;
-                if filter_needed && info.pid != numeric_value continue;
-                offset = info.pid_start;
-                count = info.pid_count;
-            case .THREAD_NAME;
-                if filter_needed && !contains(buffer.all_thread_names[info.thread_name_offset], query.value) continue;
-                offset = info.thread_name_start;
-                count = info.thread_name_count;
-            case .FIBER_ID;
-                if filter_needed && info.fiber_id != numeric_value continue;
-                offset = info.fiber_id_start;
-                count = info.fiber_id_count;
-            case .FIBER_NAME;
-                if filter_needed && !contains(buffer.all_fiber_names[info.fiber_name_offset], query.value) continue;
-                offset = info.fiber_name_start;
-                count = info.fiber_name_count;
-            case .MODULE;
-                if filter_needed && !contains(buffer.all_module_names[info.module_name_offset], query.value) continue;
-                offset = info.module_name_start;
-                count = info.module_name_count;
-            case .SOURCE_LOCATION;
-                if filter_needed && !contains(buffer.all_source_locations[info.location_offset], query.value) continue;
-                offset = info.location_start;
-                count = info.location_count;
-            case .LOG_LEVEL;
-                if filter_needed && info.log_level != query.value[0] continue;
-                offset = info.log_level_start;
-                count = 1;
+        value, offset, count := inline lookup_log_info(buffer, line_index, query.type);
+        assert(xx value);
+        if filter_needed {
+            index := inline find_index_from_left(value, query.value);
+            if index == -1 continue;
+            offset += xx index;
+            count = xx query.value.count;
         }
-        if offset == -1 continue;
 
         array_add(matches, Search_Match_Info.{xx line_index, xx offset, source_id, count});
     }
@@ -2493,7 +2501,7 @@ text_search_ui_handle_input_event :: (event: Input.Event) -> handled: bool {
     if !status return false;
 
     if status & .TEXT_CHANGED {
-        new_completions := update_text_buffer_search_results(*the_text_buffer, xx text_input.buffer);
+        new_completions := update_search_results(*the_text_buffer, xx text_input.buffer);
         save_completions(*the_text_search_ui, new_completions);
     }
 
