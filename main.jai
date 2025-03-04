@@ -1061,14 +1061,14 @@ draw_the_text_pane :: (buffer: *Log_Text_Buffer, rect: Rectangle) {
                     draw_text_line_with_ansi_escape_codes(main_font, line, n_columns_to_skip, xx pane_width_in_characters,
                                                           x, -x_tweak, y, text_y_tweak, color, codes, *current_ansi_style, override_ansi_style);
                 } else {
-                    line = advance(line, n_columns_to_skip);
+                    truncated_line := advance(line, n_columns_to_skip);
                     // I'm sleepy and this doesn't work ToT
-                    line.count = min(line.count, xx pane_width_in_characters + 1);
+                    truncated_line.count = min(truncated_line.count, xx pane_width_in_characters + 1);
 
                     // TODO: tabs handling (I fucking hate tabs!!!!)
-                    w_text := Simp.prepare_text(font, line);
+                    w_text := Simp.prepare_text(font, truncated_line);
                     // This fails for unicode!
-                    // assert(w_text == main_font.mono_width * line.count);
+                    // assert(w_text == main_font.mono_width * truncated_line.count);
 
                     Simp.draw_prepared_text(font, xx (x - x_tweak), xx (y + text_y_tweak), color);
                 }
@@ -1090,7 +1090,7 @@ draw_the_text_pane :: (buffer: *Log_Text_Buffer, rect: Rectangle) {
             // handle search match
             if the_text_search_ui.flags & .OPEN
                 // TODO @INCOMPLETE draw all matches, not just the first ones
-                draw_search_match_border(rect, main_font, text_x_tweak, y, line_index, *search_matches_cursor);
+                draw_search_match_border(rect, main_font, text_x_tweak, y, line_index, line.count, *search_matches_cursor);
 
         }
 
@@ -1253,7 +1253,7 @@ draw_text_line_with_ansi_escape_codes :: (font_set: My_Dynamic_Font, text: strin
     }
 }
 
-draw_search_match_border :: (parent_rect: Rectangle, font: My_Dynamic_Font, text_x_tweak: float, y: float, line_index: int, cursor: *int) {
+draw_search_match_border :: (parent_rect: Rectangle, font: My_Dynamic_Font, text_x_tweak: float, y: float, line_index: int, line_length: int, cursor: *int) {
     search_match: *Search_Match_Info = null;
     color := search_match_color;
 
@@ -1290,7 +1290,9 @@ draw_search_match_border :: (parent_rect: Rectangle, font: My_Dynamic_Font, text
     }
 
     // @INCOMPLETE unicode not supported
-    w := search_match.match_count * font.mono_width + border_width * 2;
+    match_count: int = search_match.match_count;
+    if match_count == U8_MAX then match_count = line_length - search_match.offset_in_line;
+    w := match_count * font.mono_width + border_width * 2;
     if x_in_rect + w < 0 {
         p0 := Vector2.{xx parent_rect.left, y_bottom + h/2};
         p1 := p0 + .{h23, -h23};
@@ -1549,6 +1551,7 @@ Log_Line_Info :: struct {
     location_start: u8;
     location_count: u8;
     log_level_start: u8;
+    message_start: u8;
 }
 
 THREAD_NAME_UNKNOWN :: 0xff;
@@ -1563,6 +1566,7 @@ Log_Info_Piece_Type :: enum {
     MODULE;
     SOURCE_LOCATION;
     LOG_LEVEL;
+    MESSAGE;
 }
 
 get_all_entities_of_type :: (buffer: *Log_Text_Buffer, type: Log_Info_Piece_Type) -> [] string {
@@ -1591,6 +1595,7 @@ get_all_entities_of_type :: (buffer: *Log_Text_Buffer, type: Log_Info_Piece_Type
                 array_add(*result, s);
             }
             return result;
+        case .MESSAGE; return .[];
     }
 }
 
@@ -1632,6 +1637,11 @@ lookup_log_info :: (buffer: *Log_Text_Buffer, line_index: int, type: Log_Info_Pi
             start := info.log_level_start;
             count := 1;
             return slice(line, start, count), start, xx,no_check count;
+        case .MESSAGE;
+            line := get_line(buffer, line_index);
+            start := info.message_start;
+            count := U8_MAX;
+            return slice(line, start, count), start, xx,no_check count;
     }
 
     log_error("entered unreachable code!");
@@ -1648,6 +1658,7 @@ info_contains :: (info: *Log_Line_Info, piece: Log_Info_Piece_Type) -> bool {
         case .MODULE;            return info.module_name_offset != MODULE_NAME_UNKNOWN;
         case .SOURCE_LOCATION;   return info.location_offset != -1;
         case .LOG_LEVEL;         return info.pid != 0;
+        case .MESSAGE;           return info.message_start != 0;
     }
 }
 
@@ -1655,7 +1666,7 @@ parse_log_line :: (buffer: *Log_Text_Buffer, line: string, info: *Log_Line_Info)
     cursor := 0;
 
     // skip whitespace
-    while cursor < line.count && inline is_space(line[cursor]) { cursor += 1; }
+    while (cursor < line.count) && (inline is_space(line[cursor])) cursor += 1;
     if cursor >= line.count return false;
 
     //
@@ -1676,14 +1687,14 @@ parse_log_line :: (buffer: *Log_Text_Buffer, line: string, info: *Log_Line_Info)
     source := slice(line, source_start, source_count);
 
     // skip whitespace
-    while cursor < line.count && inline is_space(line[cursor]) { cursor += 1; }
+    while (cursor < line.count) && (inline is_space(line[cursor])) cursor += 1;
 
     if cursor >= line.count return false;
     if line[cursor] != #char "|" return false;
     cursor += 1;
 
     // skip whitespace
-    while cursor < line.count && inline is_space(line[cursor]) { cursor += 1; }
+    while (cursor < line.count) && (inline is_space(line[cursor])) cursor += 1;
 
     //
     // parse time stamp
@@ -1722,7 +1733,7 @@ parse_log_line :: (buffer: *Log_Text_Buffer, line: string, info: *Log_Line_Info)
     //
 
     // skip whitespace
-    while cursor < line.count && inline is_space(line[cursor]) { cursor += 1; }
+    while (cursor < line.count) && (inline is_space(line[cursor])) cursor += 1;
 
     // `[`
     if line.count - cursor < 1 return false;
@@ -1768,7 +1779,7 @@ parse_log_line :: (buffer: *Log_Text_Buffer, line: string, info: *Log_Line_Info)
     //
 
     // skip whitespace
-    while cursor < line.count && inline is_space(line[cursor]) { cursor += 1; }
+    while (cursor < line.count) && (inline is_space(line[cursor])) cursor += 1;
 
     // thread name
     thread_name_start := cursor;
@@ -1861,6 +1872,11 @@ parse_log_line :: (buffer: *Log_Text_Buffer, line: string, info: *Log_Line_Info)
     assert(line[cursor] == #char ">"); cursor += 1;
 
     // the rest is just the log message
+
+    // skip whitespace
+    while (cursor < line.count) && (inline is_space(line[cursor])) cursor += 1;
+
+    info.message_start = xx cursor;
 
     return true;
 }
@@ -2161,7 +2177,9 @@ parse_search_string :: (text: string, buffer: *Log_Text_Buffer = null) -> Search
         .{.MODULE,          "module"},
         .{.SOURCE_LOCATION, "source_location"},
         .{.LOG_LEVEL,       "log_level"},
+        .{.MESSAGE,         "message"},
     ];
+    #assert type_to_name.count == type_info(Log_Info_Piece_Type).values.count;
 
     completions: [..] string;
     completions.allocator = temp;
@@ -4244,7 +4262,7 @@ parse_date_timestamp :: (input: string) -> (Calendar_Time, Parse_Date_Time_Resul
     cursor := 0;
 
     // skip whitespace
-    while cursor < input.count && inline is_space(input[cursor]) { cursor += 1; }
+    while (cursor < input.count) && (inline is_space(input[cursor])) cursor += 1;
     tail = advance(input, cursor);
     if cursor >= input.count return result, status, tail;
 
@@ -4298,7 +4316,7 @@ parse_date_timestamp :: (input: string) -> (Calendar_Time, Parse_Date_Time_Resul
     if (inline is_digit(sep)) || (inline is_alpha(sep)) return result, status, tail;
 
     // skip whitespace
-    while cursor < input.count && inline is_space(input[cursor]) { cursor += 1; }
+    while (cursor < input.count) && (inline is_space(input[cursor])) cursor += 1;
     tail = advance(input, cursor);
     if cursor >= input.count return result, status, tail;
 
