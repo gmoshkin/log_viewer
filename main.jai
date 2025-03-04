@@ -1062,7 +1062,6 @@ draw_the_text_pane :: (buffer: *Log_Text_Buffer, rect: Rectangle) {
                                                           x, -x_tweak, y, text_y_tweak, color, codes, *current_ansi_style, override_ansi_style);
                 } else {
                     truncated_line := advance(line, n_columns_to_skip);
-                    // I'm sleepy and this doesn't work ToT
                     truncated_line.count = min(truncated_line.count, xx pane_width_in_characters + 1);
 
                     // TODO: tabs handling (I fucking hate tabs!!!!)
@@ -1261,6 +1260,7 @@ draw_search_match_border :: (parent_rect: Rectangle, font: My_Dynamic_Font, text
         it := *search_results.matches[cursor.*];
         if it.line_index == line_index {
             search_match = it;
+            cursor.* += 1;
             break;
         } else if it.line_index > line_index {
             break;
@@ -1278,34 +1278,41 @@ draw_search_match_border :: (parent_rect: Rectangle, font: My_Dynamic_Font, text
     h := font.line_height + border_width;
     h23 := 2 * h / 5;
 
-    // @ROBUSTNESS this global variable `scroll_columns` access is kinda ass
-    x_in_rect := font.mono_width * (search_match.offset_in_line - scroll_columns) + text_x_tweak - border_width;
-    if x_in_rect > xx parent_rect.width {
-        p0 := Vector2.{xx right(parent_rect), y_bottom + h/2};
-        p1 := p0 + .{-h23, -h23};
-        p2 := p0 + .{-h23,  h23};
-        draw_fat_line(p0, p1, border_width, color);
-        draw_fat_line(p0, p2, border_width, color);
-        return;
+    while true {
+        // @ROBUSTNESS this global variable `scroll_columns` access is kinda ass
+        x_in_rect := font.mono_width * (search_match.offset_in_line - scroll_columns) + text_x_tweak - border_width;
+        // @INCOMPLETE unicode not supported
+        match_length: int = search_match.match_count;
+        if match_length == U8_MAX then match_length = line_length - search_match.offset_in_line;
+        w := match_length * font.mono_width + border_width * 2;
+
+        if x_in_rect > xx parent_rect.width { // match to the right of the visible line piece
+            p0 := Vector2.{xx right(parent_rect), y_bottom + h/2};
+            p1 := p0 + .{-h23, -h23};
+            p2 := p0 + .{-h23,  h23};
+            draw_fat_line(p0, p1, border_width, color);
+            draw_fat_line(p0, p2, border_width, color);
+        } else if x_in_rect + w < 0 {         // match to the left of the visible line piece
+            p0 := Vector2.{xx parent_rect.left, y_bottom + h/2};
+            p1 := p0 + .{h23, -h23};
+            p2 := p0 + .{h23,  h23};
+            draw_fat_line(p0, p1, border_width, color);
+            draw_fat_line(p0, p2, border_width, color);
+        } else {                              // match visible
+            x := parent_rect.left + x_in_rect;
+            // @INCOMPLETE currently drawing outside `parent_rect` sometimes
+            draw_hollow_axis_aligned_rectangle(xx x, xx y_bottom, xx w, xx h, border = 2, color);
+        }
+
+        if cursor.* >= search_results.matches.count break;
+
+        it := *search_results.matches[cursor.*];
+        if it.line_index != line_index break;
+
+        assert(search_match != it);
+        search_match = it;
+        cursor.* += 1;
     }
-
-    // @INCOMPLETE unicode not supported
-    match_count: int = search_match.match_count;
-    if match_count == U8_MAX then match_count = line_length - search_match.offset_in_line;
-    w := match_count * font.mono_width + border_width * 2;
-    if x_in_rect + w < 0 {
-        p0 := Vector2.{xx parent_rect.left, y_bottom + h/2};
-        p1 := p0 + .{h23, -h23};
-        p2 := p0 + .{h23,  h23};
-        draw_fat_line(p0, p1, border_width, color);
-        draw_fat_line(p0, p2, border_width, color);
-        return;
-    }
-
-    x := parent_rect.left + x_in_rect;
-    // @INCOMPLETE currently drawing outside `parent_rect` sometimes
-    draw_hollow_axis_aligned_rectangle(xx x, xx y_bottom, xx w, xx h, border = 2, color);
-
 }
 
 screen_position_to_line_index :: (rect: Rectangle, y: float) -> s64 {
@@ -2082,14 +2089,14 @@ update_search_results :: (using buffer: *Log_Text_Buffer, search_string: string)
 
     if !search_string return .{};
 
-    query, do_query, completions := parse_search_string(search_string, buffer);
+    queries, do_query, completions := parse_search_string(search_string, buffer);
 
     search_string_lowercase := to_lower_copy(search_string,, temp);
     for search_string if is_alpha(it) { search_results.flags |= .CASE_INSENSITIVE; break; }
 
     if do_query {
         search_results.flags |= .STRUCTURED_QUERY;
-        do_query_search(buffer, query, *search_results.matches);
+        do_query_search(buffer, queries, *search_results.matches);
     } else {
         do_text_search(buffer, search_string_lowercase, *search_results.matches, xx (search_results.flags & .CASE_INSENSITIVE));
     }
@@ -2126,37 +2133,88 @@ do_text_search :: (buffer: *Log_Text_Buffer, search_string_lowercase: string, ma
 }
 
 Search_Query :: struct {
+    match_any: [] Search_Query_Match_All;
+}
+
+Search_Query_Match_All :: struct {
+    match_all: [] Search_Query_Leaf;
+}
+
+Search_Query_Leaf :: struct {
     type: Log_Info_Piece_Type;
     value: string;
 }
 
-do_query_search :: (buffer: *Log_Text_Buffer, query: Search_Query, matches: *[..] Search_Match_Info) {
-    filter_needed := (query.value != "");
-    for * info, line_index: buffer.line_infos {
-        if !info_contains(info, query.type) continue;
-        source_id := info.source_id;
+do_query_search :: (buffer: *Log_Text_Buffer, queries: Search_Query, matches: *[..] Search_Match_Info) {
+    line_matches := resizable_array(Search_Match_Info.[],, temp);
+    for * line_info, line_index: buffer.line_infos {
+        source_id := line_info.source_id;
 
-        value, offset, count := inline lookup_log_info(buffer, line_index, query.type);
-        assert(xx value);
-        if filter_needed {
-            index := inline find_index_from_left(value, query.value);
-            if index == -1 continue;
-            offset += xx index;
-            count = xx query.value.count;
+        for match_any: queries.match_any {
+            inline array_reset_keeping_memory(*line_matches);
+
+            for query: match_any.match_all {
+                if !info_contains(line_info, query.type) continue match_any;
+
+                value, offset, count := inline lookup_log_info(buffer, line_index, query.type);
+                assert(xx value);
+                if query.value != "" {
+                    index := inline find_index_from_left(value, query.value);
+                    if index == -1 continue match_any;
+                    offset += xx index;
+                    count = xx query.value.count;
+                }
+
+                array_add(*line_matches, Search_Match_Info.{xx line_index, xx offset, source_id, count});
+            }
+
+            array_add(matches, ..line_matches);
         }
-
-        array_add(matches, Search_Match_Info.{xx line_index, xx offset, source_id, count});
     }
 }
 
-parse_search_string :: (text: string, buffer: *Log_Text_Buffer = null) -> Search_Query, ok: bool, completions: Completions {
+parse_search_string :: (text: string, buffer: *Log_Text_Buffer = null) -> (Search_Query, ok: bool, completions: Completions) {
+    match_any: [..] Search_Query_Match_All;
+    match_all: [..] Search_Query_Leaf;
+    match_all.allocator = temp;
+    completions: Completions;
+
+    tail := text;
+    tail = inline trim_left(tail);
+    while tail {
+        query, ok, completions=, cursor := parse_search_query_leaf(tail, buffer);
+        if !ok {
+            if match_all array_add(*match_any, .{match_all});
+            return .{match_any}, false, completions;
+        }
+
+        array_add(*match_all, query);
+        advance(*tail, cursor);
+        tail = inline trim_left(tail);
+
+        if tail && tail[0] == #char "|" {
+            advance(*tail);
+            tail = inline trim_left(tail);
+
+            array_add(*match_any, .{array_copy(match_all,, temp)});
+            array_reset_keeping_memory(*match_all);
+        }
+    }
+
+    if match_all array_add(*match_any, .{match_all});
+
+    return .{match_any}, true, completions;
+}
+
+// completions and possibly Search_Query_Leaf are allocated on temporary storage
+parse_search_query_leaf :: (text: string, buffer: *Log_Text_Buffer = null) -> (Search_Query_Leaf, ok: bool, completions: Completions, cursor: int) {
     cursor := 0;
 
     // skip spaces
     while (cursor < text.count) && (inline is_space(text[cursor])) cursor += 1;
-    if cursor == text.count return .{}, false, .{};
+    if cursor == text.count return .{}, false, .{}, cursor;
 
-    if text[cursor] != #char "$" return .{}, false, .{};
+    if text[cursor] != #char "$" return .{}, false, .{}, cursor;
     cursor += 1;
 
     type_start := cursor;
@@ -2166,7 +2224,7 @@ parse_search_string :: (text: string, buffer: *Log_Text_Buffer = null) -> Search
         cursor += 1;
     }
 
-    result: Search_Query;
+    result: Search_Query_Leaf;
 
     type_to_name :: (struct { type: Log_Info_Piece_Type; name: string; }).[
         .{.SOURCE,          "source"},
@@ -2198,16 +2256,16 @@ parse_search_string :: (text: string, buffer: *Log_Text_Buffer = null) -> Search
         }
     }
 
-    if !match return .{}, false, .{completions, type_string.count};
+    if !match return .{}, false, .{completions, type_string.count}, cursor;
 
     // skip spaces
     while (cursor < text.count) && (inline is_space(text[cursor])) cursor += 1;
 
     all_values := ifx buffer then get_all_entities_of_type(buffer, result.type);
 
-    if cursor == text.count return result, true, .{all_values, 0};
+    if cursor == text.count return result, true, .{all_values, 0}, cursor;
 
-    if text[cursor] != #char "=" return .{}, false, .{};
+    if text[cursor] != #char "=" return .{}, false, .{}, cursor;
     cursor += 1;
 
     // skip spaces
@@ -2215,12 +2273,13 @@ parse_search_string :: (text: string, buffer: *Log_Text_Buffer = null) -> Search
 
     // nothing after =, complete every possible entity
     if cursor == text.count {
-        return result, true, .{all_values, 0};
+        return result, true, .{all_values, 0}, cursor;
     }
 
     if text[cursor] == #char "\"" {
-        value, ok := parse_string_literal(advance(text, cursor),, temp);
-        if !ok return .{}, false, .{};
+        value, ok, cursor_offset := parse_string_literal(advance(text, cursor),, temp);
+        cursor += cursor_offset;
+        if !ok return .{}, false, .{}, cursor;
         result.value = value;
     } else {
         value_start := cursor;
@@ -2238,12 +2297,13 @@ parse_search_string :: (text: string, buffer: *Log_Text_Buffer = null) -> Search
         }
     }
 
-    return result, true, .{completions, result.value.count};
+    return result, true, .{completions, result.value.count}, cursor;
 }
 
-parse_string_literal :: (input: string) -> string, ok: bool {
+// result allocated with context.allocator
+parse_string_literal :: (input: string) -> (result: string, ok: bool, read_cursor: int) {
     read_cursor := 0;
-    if input[read_cursor] != #char "\"" return "", false;
+    if input[read_cursor] != #char "\"" return "", false, 0;
     read_cursor += 1;
 
     result: string;
@@ -2276,7 +2336,7 @@ parse_string_literal :: (input: string) -> string, ok: bool {
         }
 
         if c == #char "x" {
-            if read_cursor > input.count - 2 { return "", false; }
+            if read_cursor > input.count - 2 { return "", false, 0; }
             l := input[read_cursor]; read_cursor += 1;
             h := input[read_cursor]; read_cursor += 1;
 
@@ -2286,7 +2346,7 @@ parse_string_literal :: (input: string) -> string, ok: bool {
     }
 
     result.count = write_cursor;
-    return result, true;
+    return result, success, read_cursor;
 }
 
 search_for_match_case_sensitive :: (line: string, search_string: string, $max_offset: int = S16_MAX, $do_assert := false) -> s64 {
@@ -4839,29 +4899,69 @@ pretty_assert :: (code: Code, loc := #caller_location) #expand {
 test_parse_search_string :: () {
     {
         line := "$log_level=V";
-        query, ok := parse_search_string(line);
+        queries, ok := parse_search_string(line);
         assert(ok);
+        assert(queries.match_any.count == 1);
+        assert(queries.match_any[0].match_all.count == 1);
+        query := queries.match_any[0].match_all[0];
         assert(query.type == .LOG_LEVEL, "%", query.type);
         pretty_assert(query.value == "V");
     }
     {
         line := "  $fiber_name=governor_loop  ";
-        query, ok := parse_search_string(line);
+        queries, ok := parse_search_string(line);
         assert(ok);
+        assert(queries.match_any.count == 1);
+        assert(queries.match_any[0].match_all.count == 1);
+        query := queries.match_any[0].match_all[0];
         assert(query.type == .FIBER_NAME, "%", query.type);
         pretty_assert(query.value == "governor_loop");
     }
     {
         line := "$ module=vshard  ";
-        query, ok := parse_search_string(line);
+        queries, ok := parse_search_string(line);
         assert(!ok);
+        assert(queries.match_any.count == 0);
     }
     {
         line := "$fiber_name=\"name with spaces\"  ";
-        query, ok := parse_search_string(line);
+        queries, ok := parse_search_string(line);
         assert(ok);
+        assert(queries.match_any.count == 1);
+        assert(queries.match_any[0].match_all.count == 1);
+        query := queries.match_any[0].match_all[0];
         assert(query.type == .FIBER_NAME, "%", query.type);
         pretty_assert(query.value == "name with spaces");
+    }
+    {
+        line := " $fiber_name=\"name with spaces\"  $log_level=E | $source=my_ass ";
+        queries, ok := parse_search_string(line);
+        assert(ok);
+        assert(queries.match_any.count == 2);
+        assert(queries.match_any[0].match_all.count == 2);
+        query_0_0 := queries.match_any[0].match_all[0];
+        assert(query_0_0.type == .FIBER_NAME, "%", query_0_0.type);
+        pretty_assert(query_0_0.value == "name with spaces");
+        query_0_1 := queries.match_any[0].match_all[1];
+        assert(query_0_1.type == .LOG_LEVEL, "%", query_0_1.type);
+        pretty_assert(query_0_1.value == "E");
+        assert(queries.match_any[1].match_all.count == 1);
+        query_1_0 := queries.match_any[1].match_all[0];
+        assert(query_1_0.type == .SOURCE, "%", query_1_0.type);
+        pretty_assert(query_1_0.value == "my_ass");
+    }
+    {
+        line := " $thread_name=main  $fiber_id=\"999\" $ ";
+        queries, ok := parse_search_string(line);
+        assert(!ok);
+        assert(queries.match_any.count == 1);
+        assert(queries.match_any[0].match_all.count == 2);
+        query_0_0 := queries.match_any[0].match_all[0];
+        assert(query_0_0.type == .THREAD_NAME, "%", query_0_0.type);
+        pretty_assert(query_0_0.value == "main");
+        query_0_1 := queries.match_any[0].match_all[1];
+        assert(query_0_1.type == .FIBER_ID, "%", query_0_1.type);
+        pretty_assert(query_0_1.value == "999");
     }
 }
 
@@ -4870,7 +4970,7 @@ test_parse_string_literal :: () {
         line := #string END
 "simple"
         END;
-        out, ok := parse_string_literal(line);
+        out, ok := parse_string_literal(line,, temp);
         assert(ok);
         assert(out == "simple");
     }
@@ -4878,7 +4978,7 @@ test_parse_string_literal :: () {
         line := #string END
 "\"a\", \"b\", \"\\\""
         END;
-        out, ok := parse_string_literal(line);
+        out, ok := parse_string_literal(line,, temp);
         assert(ok);
         expected := #string END
 "a", "b", "\"
