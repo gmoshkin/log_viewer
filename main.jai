@@ -1664,7 +1664,7 @@ info_contains :: (info: *Log_Line_Info, piece: Log_Info_Piece_Type) -> bool {
         case .FIBER_NAME;        return info.fiber_name_offset != -1;
         case .MODULE;            return info.module_name_offset != MODULE_NAME_UNKNOWN;
         case .SOURCE_LOCATION;   return info.location_offset != -1;
-        case .LOG_LEVEL;         return info.pid != 0;
+        case .LOG_LEVEL;         return info.pid != -1;
         case .MESSAGE;           return info.message_start != 0;
     }
 }
@@ -3527,10 +3527,21 @@ find_previous_word_start :: (text: string, cursor: int) -> start: int {
     while start > 0 && inline is_space(text[start - 1]) {
         start -= 1;
     }
-    // Second find the word's start
-    while start > 0 && !inline is_space(text[start - 1]) {
-        start -= 1;
+
+    if start == 0 return start;
+
+    if inline is_word(text[start - 1]) {
+        // Second find the word start
+        while start > 0 && inline is_word(text[start - 1]) {
+            start -= 1;
+        }
+    } else {
+        // Second find the punctuation start
+        while start > 0 && inline is_punctuation(text[start - 1]) {
+            start -= 1;
+        }
     }
+
     return start;
 }
 
@@ -3540,10 +3551,21 @@ find_next_word_end :: (text: string, cursor: int) -> end: int {
     while end < text.count && inline is_space(text[end]) {
         end += 1;
     }
-    // Second find the word's end
-    while end < text.count && !inline is_space(text[end]) {
-        end += 1;
+
+    if end == text.count return end;
+
+    if inline is_word(text[end]) {
+        // Second find the word end
+        while end < text.count && inline is_word(text[end]) {
+            end += 1;
+        }
+    } else {
+        // Second find the punctuation end
+        while end < text.count && inline is_punctuation(text[end]) {
+            end += 1;
+        }
     }
+
     return end;
 }
 
@@ -3554,18 +3576,42 @@ find_word_around_cursor :: (text: string, cursor: int) -> (start: s32, count: s3
         start -= 1;
     }
 
-    // Second find the word's start
-    while start > 0 && !inline is_space(text[start - 1]) {
-        start -= 1;
-    }
+    if start == 0 return xx start, xx cursor;
 
-    // Third find the word's end
+    word_mode := inline is_word(text[start - 1]);
+
     count := 0;
-    while start + count < text.count && !inline is_space(text[start + count]) {
-        count += 1;
+    if word_mode {
+        // Second find the word start
+        while start > 0 && inline is_word(text[start - 1]) {
+            start -= 1;
+        }
+
+        // Third find the word end
+        while start + count < text.count && inline is_word(text[start + count]) {
+            count += 1;
+        }
+    } else {
+        // Second find the punctuation start
+        while start > 0 && inline is_punctuation(text[start - 1]) {
+            start -= 1;
+        }
+
+        // Third find the punctuation end
+        while start + count < text.count && inline is_punctuation(text[start + count]) {
+            count += 1;
+        }
     }
 
     return xx start, xx count;
+}
+
+is_word :: (c: u8) -> bool {
+    return inline is_alnum(c);
+}
+
+is_punctuation :: (c: u8) -> bool {
+    return !(inline is_alnum(c)) && !(inline is_space(c));
 }
 
 text_input_update_click_streak :: (using state: *Text_Input_State) -> int {
