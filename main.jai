@@ -1008,7 +1008,7 @@ draw_the_text_pane :: (buffer: *Log_Text_Buffer, rect: Rectangle) {
             first_line = min(first_line, line_index);
             last_line = max(last_line, line_index);
 
-            if line_index == hover_line_index then do_structured_log_info(buffer, info, rect, mouse, .{x, y});
+            if line_index == hover_line_index then do_structured_log_info(buffer, info, line_index, rect, mouse, .{x, y});
 
             // handle log line info
             color := text_color;
@@ -1153,21 +1153,29 @@ draw_the_text_pane :: (buffer: *Log_Text_Buffer, rect: Rectangle) {
     }
 }
 
-do_structured_log_info :: (buffer: *Log_Text_Buffer, info: *Log_Line_Info, parent_rect: Rectangle, mouse: Vector2, origin: Vector2) {
-    if info.source_id != SOURCE_ID_UNKNOWN {
-        source := buffer.all_log_sources[info.source_id];
-        if xx (info.source_start + source.count) > scroll_columns {
-            x_start := origin.x + (info.source_start - scroll_columns) * main_font.mono_width;
-            x_end := min(x_start + source.count * main_font.mono_width, xx right(parent_rect));
-            x_start = max(x_start, xx left(parent_rect));
+do_structured_log_info :: (buffer: *Log_Text_Buffer, info: *Log_Line_Info, line_index: int, parent_rect: Rectangle, mouse: Vector2, origin: Vector2) {
+    for type_info(Log_Info_Piece_Type).values {
+        type := cast(Log_Info_Piece_Type) it;
+        if !info_contains(info, type) continue;
 
-            if mouse.x >= x_start && mouse.x <= x_end {
-                w := x_end - x_start;
-                draw_hollow_axis_aligned_rectangle(xx x_start, xx origin.y, xx w, xx main_font.line_height, 2, color_gray);
+        _, start, count_u8 := inline lookup_log_info(buffer, info, type);
+        count := cast(int) count_u8;
+        if count == U8_MAX {
+            line := get_line(buffer, line_index);
+            count = line.count - start;
+        }
+        x_start := origin.x + (start - scroll_columns) * main_font.mono_width;
+        x_end := x_start + count * main_font.mono_width;
+        // XXX: adjust start after computing end!
+        x_start = max(x_start, xx left(parent_rect));
+        x_end = min(x_end, xx right(parent_rect));
 
-                if !mouse_event_handled && is_click(.MOUSE_BUTTON_RIGHT) {
-                    log_source_open_popup_menu(info, mouse);
-                }
+        if mouse.x >= x_start && mouse.x <= x_end {
+            w := x_end - x_start;
+            draw_hollow_axis_aligned_rectangle(xx x_start, xx origin.y, xx w, xx main_font.line_height, 2, color_gray);
+
+            if !mouse_event_handled && is_click(.MOUSE_BUTTON_RIGHT) {
+                log_info_open_popup_menu(info, mouse, line_index, type);
             }
         }
     }
@@ -1368,6 +1376,9 @@ the_text_buffer: Log_Text_Buffer;
 reset_text_buffer :: (using buffer: *Log_Text_Buffer) {
     array_reset_keeping_memory(*line_infos);
     max_line_length = 0;
+
+    // Close the popup menu, because it can have references to the old data
+    the_popup_menu.flags &= ~.OPEN;
 
     array_reset_keeping_memory(*all_log_sources);
     array_reserve(*all_log_sources, SOURCE_ID_UNKNOWN);
@@ -1581,6 +1592,19 @@ Log_Info_Piece_Type :: enum {
     MESSAGE;
 }
 
+log_info_type_to_name :: (struct { type: Log_Info_Piece_Type; name: string; }).[
+    .{.SOURCE,          "source"},
+    .{.PID,             "pid"},
+    .{.THREAD_NAME,     "thread_name"},
+    .{.FIBER_ID,        "fiber_id"},
+    .{.FIBER_NAME,      "fiber_name"},
+    .{.MODULE,          "module"},
+    .{.SOURCE_LOCATION, "source_location"},
+    .{.LOG_LEVEL,       "log_level"},
+    .{.MESSAGE,         "message"},
+];
+#assert log_info_type_to_name.count == type_info(Log_Info_Piece_Type).values.count;
+
 get_all_entities_of_type :: (buffer: *Log_Text_Buffer, type: Log_Info_Piece_Type) -> [] string {
     if #complete type == {
         case .SOURCE;           return buffer.all_log_sources;
@@ -1611,8 +1635,17 @@ get_all_entities_of_type :: (buffer: *Log_Text_Buffer, type: Log_Info_Piece_Type
     }
 }
 
-lookup_log_info :: (buffer: *Log_Text_Buffer, line_index: int, type: Log_Info_Piece_Type) -> string, start: s16, count: u8 {
+lookup_log_info :: inline (buffer: *Log_Text_Buffer, line_index: int, type: Log_Info_Piece_Type) -> string, start: s16, count: u8 {
     info := *buffer.line_infos[line_index];
+    value, start, count := lookup_log_info(buffer, info, type);
+    if !value && count {
+        line := get_line(buffer, line_index);
+        value = slice(line, start, count);
+    }
+    return value, start, count;
+}
+
+lookup_log_info :: (buffer: *Log_Text_Buffer, info: *Log_Line_Info, type: Log_Info_Piece_Type) -> string, start: s16, count: u8 {
     if #complete type == {
         case .SOURCE;
             start := info.source_start;
@@ -1635,25 +1668,21 @@ lookup_log_info :: (buffer: *Log_Text_Buffer, line_index: int, type: Log_Info_Pi
             count: = info.location_count;
             return buffer.all_source_locations[info.location_offset], start, count;
         case .PID;
-            line := get_line(buffer, line_index);
             start := info.pid_start;
             count := info.pid_count;
-            return slice(line, start, count), start, count;
+            return "", start, count;
         case .FIBER_ID;
-            line := get_line(buffer, line_index);
             start := info.fiber_id_start;
             count := info.fiber_id_count;
-            return slice(line, start, count), start, count;
+            return "", start, count;
         case .LOG_LEVEL;
-            line := get_line(buffer, line_index);
             start := info.log_level_start;
             count := 1;
-            return slice(line, start, count), start, xx,no_check count;
+            return "", start, xx,no_check count;
         case .MESSAGE;
-            line := get_line(buffer, line_index);
             start := info.message_start;
             count := U8_MAX;
-            return slice(line, start, count), start, xx,no_check count;
+            return "", start, xx,no_check count;
     }
 
     log_error("entered unreachable code!");
@@ -1962,10 +1991,15 @@ get_log_source_color :: (source_id: u8) -> Vector4 {
     return log_source_color_scheme[source_id % log_source_color_scheme.count];
 }
 
-log_source_open_popup_menu :: (info: *Log_Line_Info, mouse: Vector2) {
-    menu := open_the_popup_menu(mouse, log_line_popup_menu_callback, info.source_id);
+log_info_open_popup_menu :: (info: *Log_Line_Info, mouse: Vector2, line_index: int, type: Log_Info_Piece_Type) {
+    data := Log_Line_Popup_Menu_Callback_Data.{line_index, type};
+    menu := open_the_popup_menu(mouse, log_line_popup_menu_callback, data);
 
-    for log_source, source_id: the_text_buffer.all_log_sources {
+    using Log_Line_Popup_Menu_Item;
+    popup_menu_push_item(menu, "Copy text to clipboard", id=xx COPY_TEXT);
+    popup_menu_push_item(menu, "Add to search query", id=xx ADD_TO_SEARCH);
+
+    if type == .SOURCE for log_source, source_id: the_text_buffer.all_log_sources {
         // Skip self
         if source_id == info.source_id continue;
 
@@ -1973,7 +2007,8 @@ log_source_open_popup_menu :: (info: *Log_Line_Info, mouse: Vector2) {
 
         color := get_log_source_color(xx source_id);
         pids := table_find_multiple(*the_text_buffer.sources_to_pid, log_source);
-        popup_menu_push_item(menu, "Merge with % (pid: %)", log_source, pids, id=source_id, icon=.{color, 8.0, .SQUARE});
+        item_id := xx MERGE_SOURCE + source_id;
+        popup_menu_push_item(menu, "Merge with % (pid: %)", log_source, pids, id=item_id, icon=.{color, 8.0, .SQUARE});
     }
 }
 
@@ -2042,15 +2077,73 @@ detect_cycle :: (merges: [] Merge_Info, from: u8, to: u8) -> found_cycle: bool {
     return false;
 }
 
+Log_Line_Popup_Menu_Callback_Data :: struct {
+    line_index: int;
+    type: Log_Info_Piece_Type;
+}
+
+Log_Line_Popup_Menu_Item :: enum {
+    COPY_TEXT;
+    ADD_TO_SEARCH;
+    MERGE_SOURCE :: 0x100;
+}
 
 log_line_popup_menu_callback :: (menu: *Popup_Menu, event: Popup_Menu.Event) {
-    assert(menu.callback_data.type == type_info(u8));
-    this_source_id := cast(*u8, menu.callback_data.value_pointer).*;
+    assert(menu.callback_data.type == type_info(Log_Line_Popup_Menu_Callback_Data));
+    using data := cast(*Log_Line_Popup_Menu_Callback_Data, menu.callback_data.value_pointer).*;
+
+    buffer := *the_text_buffer;
+    info := *buffer.line_infos[line_index];
+
+    item_id := cast(Log_Line_Popup_Menu_Item) menu.items[menu.hovered_item].id;
 
     if event == .CLICK {
-        id := menu.items[menu.hovered_item].id;
-        array_add(*the_text_buffer.merged_log_sources, .{to=xx this_source_id, from=xx id});
-        log("merged sources % and %", this_source_id, id);
+        if item_id == {
+
+        case .COPY_TEXT;
+            value := lookup_log_info(buffer, line_index, type);
+            assert(xx value);
+            os_clipboard_set_text(value);
+
+        case .ADD_TO_SEARCH;
+            value := lookup_log_info(buffer, line_index, type);
+            assert(xx value);
+
+            type_name: string;
+            for log_info_type_to_name {
+                if it.type != type continue;
+                type_name = it.name;
+                break;
+            }
+            assert(xx type_name);
+
+            text_input := *the_text_search_ui.text_input;
+            if text_input.buffer && last(text_input.buffer) != #char " "
+            text_input_append_text(text_input, " ");
+            text_input_append_text(text_input, "$");
+            text_input_append_text(text_input, type_name);
+            text_input_append_text(text_input, "=");
+            if contains_any_character(value, " \\\"") {
+                text_input_append_text(text_input, to_string_literal(value));
+            } else {
+                text_input_append_text(text_input, value);
+            }
+
+            new_completions := update_search_results(buffer, xx text_input.buffer);
+            save_completions(*the_text_search_ui, new_completions);
+            open_text_search_ui();
+        }
+    }
+
+    if type == .SOURCE {
+        if event == .CLICK {
+            if item_id >= .MERGE_SOURCE {
+                id := cast(int) item_id - cast(int) Log_Line_Popup_Menu_Item.MERGE_SOURCE;
+                this_source_id := info.source_id;
+                array_add(*buffer.merged_log_sources, .{to=xx this_source_id, from=xx id});
+                log("merged sources % and %", this_source_id, id);
+            }
+        }
     }
 }
 
@@ -2231,25 +2324,12 @@ parse_search_query_leaf :: (text: string, buffer: *Log_Text_Buffer = null) -> (S
 
     result: Search_Query_Leaf;
 
-    type_to_name :: (struct { type: Log_Info_Piece_Type; name: string; }).[
-        .{.SOURCE,          "source"},
-        .{.PID,             "pid"},
-        .{.THREAD_NAME,     "thread_name"},
-        .{.FIBER_ID,        "fiber_id"},
-        .{.FIBER_NAME,      "fiber_name"},
-        .{.MODULE,          "module"},
-        .{.SOURCE_LOCATION, "source_location"},
-        .{.LOG_LEVEL,       "log_level"},
-        .{.MESSAGE,         "message"},
-    ];
-    #assert type_to_name.count == type_info(Log_Info_Piece_Type).values.count;
-
     completions: [..] string;
     completions.allocator = temp;
 
     type_string := slice(text, type_start, cursor - type_start);
     match := false;
-    for type_to_name {
+    for log_info_type_to_name {
         if it.name == type_string {
             result.type = it.type;
             match = true;
@@ -2352,6 +2432,15 @@ parse_string_literal :: (input: string) -> (result: string, ok: bool, read_curso
 
     result.count = write_cursor;
     return result, success, read_cursor;
+}
+
+to_string_literal :: (text: string) -> string {
+    builder: String_Builder;
+    builder.allocator = temp;
+    append(*builder, #char "\"");
+    print_ascii_or_hex(*builder, text);
+    append(*builder, #char "\"");
+    return builder_to_string(*builder);
 }
 
 search_for_match_case_sensitive :: (line: string, search_string: string, $max_offset: int = S16_MAX, $do_assert := false) -> s64 {
@@ -3348,8 +3437,7 @@ text_input_handle_event :: (state: *Text_Input_State, event: Input.Event, comple
             return .HANDLED;
         }
 
-        array_insert_at(*state.buffer, char, state.cursor);
-        state.cursor += 1;
+        inline text_input_insert_text_at_cursor(state, xx u8.[char]);
 
         return .TEXT_CHANGED;
 
@@ -3361,6 +3449,7 @@ text_input_handle_event :: (state: *Text_Input_State, event: Input.Event, comple
         case .BACKSPACE;
             if state.flags & .SELECTION_ACTIVE {
                 text_input_delete_selection(state);
+                return .TEXT_CHANGED;
             } else if state.cursor > 0 {
                 delete_to := ifx event.ctrl_pressed then find_previous_word_start(xx state.buffer, state.cursor)
                                                     else state.cursor - 1;
@@ -3374,6 +3463,7 @@ text_input_handle_event :: (state: *Text_Input_State, event: Input.Event, comple
         case .DELETE;
             if state.flags & .SELECTION_ACTIVE {
                 text_input_delete_selection(state);
+                return .TEXT_CHANGED;
             } else if state.cursor < state.buffer.count {
                 delete_to := ifx event.ctrl_pressed then find_next_word_end(xx state.buffer, state.cursor)
                                                     else state.cursor + 1;
@@ -3432,8 +3522,7 @@ text_input_handle_event :: (state: *Text_Input_State, event: Input.Event, comple
                         return .HANDLED;
                     }
 
-                    array_insert_at(*state.buffer, cast([] u8) text, state.cursor);
-                    state.cursor += text.count;
+                    inline text_input_insert_text_at_cursor(state, text);
                     return .TEXT_CHANGED;
                 }
                 return .HANDLED;
@@ -3499,6 +3588,20 @@ text_input_handle_event :: (state: *Text_Input_State, event: Input.Event, comple
     }
 
     return 0;
+}
+
+text_input_get_text :: inline (state: *Text_Input_State) -> string {
+    return xx state.buffer;
+}
+
+text_input_append_text :: (state: *Text_Input_State, text: string) {
+    state.cursor = state.buffer.count;
+    inline text_input_insert_text_at_cursor(state, text);
+}
+
+text_input_insert_text_at_cursor :: (state: *Text_Input_State, text: string) {
+    array_insert_at(*state.buffer, cast([] u8) text, state.cursor);
+    state.cursor += text.count;
 }
 
 text_input_update_selection_state_for_movement :: inline (state: *Text_Input_State, shift_pressed: bool) -> selection_ended: bool {
@@ -4829,6 +4932,10 @@ as_bytes :: (data: *$T, count: s64) -> [] u8 {
 min_max :: inline (a: $T, b: T) -> (min: T, max: T) {
     if a < b return a, b;
     return b, a;
+}
+
+last :: (s: [] string) -> u8 #expand {
+    return s[s.count - 1];
 }
 
 last :: (array: [] $T) -> T #expand {
