@@ -2119,7 +2119,7 @@ log_line_popup_menu_callback :: (menu: *Popup_Menu, event: Popup_Menu.Event) {
 
             text_input := *the_text_search_ui.text_input;
             if text_input.buffer && last(text_input.buffer) != #char " "
-            text_input_append_text(text_input, " ");
+                text_input_append_text(text_input, " ");
             text_input_append_text(text_input, "$");
             text_input_append_text(text_input, type_name);
             text_input_append_text(text_input, "=");
@@ -3595,6 +3595,7 @@ text_input_get_text :: inline (state: *Text_Input_State) -> string {
 }
 
 text_input_append_text :: (state: *Text_Input_State, text: string) {
+    state.flags &= ~.SELECTION_ACTIVE;
     state.cursor = state.buffer.count;
     inline text_input_insert_text_at_cursor(state, text);
 }
