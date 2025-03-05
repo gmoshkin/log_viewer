@@ -1008,28 +1008,13 @@ draw_the_text_pane :: (buffer: *Log_Text_Buffer, rect: Rectangle) {
             first_line = min(first_line, line_index);
             last_line = max(last_line, line_index);
 
+            if line_index == hover_line_index then do_structured_log_info(buffer, info, rect, mouse, .{x, y});
+
             // handle log line info
             color := text_color;
             if info.source_id != SOURCE_ID_UNKNOWN {
                 color = get_log_source_color(info.source_id);
-
-                source := buffer.all_log_sources[info.source_id];
-                if line_index == hover_line_index && (xx (info.source_start + source.count) > scroll_columns) {
-                    x_start := x + (info.source_start - scroll_columns) * main_font.mono_width;
-                    x_end := min(x_start + source.count * main_font.mono_width, xx right(rect));
-                    x_start = max(x_start, xx left(rect));
-
-                    if mouse.x >= x_start && mouse.x <= x_end {
-                        w := x_end - x_start;
-                        draw_hollow_axis_aligned_rectangle(xx x_start, xx y, xx w, xx main_font.line_height, 2, color_gray);
-
-                        if !mouse_event_handled && is_click(.MOUSE_BUTTON_RIGHT) {
-                            log_source_open_popup_menu(info, mouse);
-                        }
-                    }
-                }
             }
-
 
             // handle anchor segment
             inside_anchor_segment := (line_index >= anchor_segment_first) && (line_index <= anchor_segment_last);
@@ -1164,6 +1149,26 @@ draw_the_text_pane :: (buffer: *Log_Text_Buffer, rect: Rectangle) {
             draw_fat_line(.{x_prev, y_prev}, .{x, y}, line_width, color);
 
             x_prev, y_prev = x, y;
+        }
+    }
+}
+
+do_structured_log_info :: (buffer: *Log_Text_Buffer, info: *Log_Line_Info, parent_rect: Rectangle, mouse: Vector2, origin: Vector2) {
+    if info.source_id != SOURCE_ID_UNKNOWN {
+        source := buffer.all_log_sources[info.source_id];
+        if xx (info.source_start + source.count) > scroll_columns {
+            x_start := origin.x + (info.source_start - scroll_columns) * main_font.mono_width;
+            x_end := min(x_start + source.count * main_font.mono_width, xx right(parent_rect));
+            x_start = max(x_start, xx left(parent_rect));
+
+            if mouse.x >= x_start && mouse.x <= x_end {
+                w := x_end - x_start;
+                draw_hollow_axis_aligned_rectangle(xx x_start, xx origin.y, xx w, xx main_font.line_height, 2, color_gray);
+
+                if !mouse_event_handled && is_click(.MOUSE_BUTTON_RIGHT) {
+                    log_source_open_popup_menu(info, mouse);
+                }
+            }
         }
     }
 }
