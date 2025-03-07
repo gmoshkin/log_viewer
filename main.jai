@@ -85,6 +85,8 @@ main :: () {
     set_allocators(*the_popup_menu.pool);
     the_popup_menu.allocator = .{pool_allocator_proc, *the_popup_menu.pool};
 
+    remember_allocators(*the_text_search_ui.text_input.buffer);
+
     Profile();
     load_text_buffer_data(*the_text_buffer, input_from_clipboard);
     Profile();
