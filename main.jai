@@ -2126,7 +2126,7 @@ log_line_popup_menu_callback :: (menu: *Popup_Menu, event: Popup_Menu.Event) {
             text_input_append_text(text_input, type_name);
             text_input_append_text(text_input, "=");
             if contains_any_character(value, " \\\"") {
-                text_input_append_text(text_input, to_string_literal(value));
+                text_input_append_text(text_input, to_string_literal(value,, temp));
             } else {
                 text_input_append_text(text_input, value);
             }
@@ -2185,6 +2185,7 @@ update_search_results :: (using buffer: *Log_Text_Buffer, search_string: string)
 
     search_results.text_buffer = buffer;
     array_reset_keeping_memory(*search_results.matches);
+    search_results.matches.allocator = context.default_allocator;
     search_results.flags = 0;
 
     if !search_string return .{};
@@ -2275,6 +2276,7 @@ do_query_search :: (buffer: *Log_Text_Buffer, queries: Search_Query, matches: *[
 
 parse_search_string :: (text: string, buffer: *Log_Text_Buffer = null) -> (Search_Query, ok: bool, completions: Completions) {
     match_any: [..] Search_Query_Match_All;
+    match_any.allocator = temp;
     match_all: [..] Search_Query_Leaf;
     match_all.allocator = temp;
     completions: Completions;
@@ -3599,6 +3601,7 @@ text_input_get_text :: inline (state: *Text_Input_State) -> string {
 text_input_append_text :: (state: *Text_Input_State, text: string) {
     state.flags &= ~.SELECTION_ACTIVE;
     state.cursor = state.buffer.count;
+    assert(state.buffer.allocator.proc == Default_Allocator.allocator_proc);
     inline text_input_insert_text_at_cursor(state, text);
 }
 
@@ -4775,7 +4778,7 @@ array_insert_at :: (array: *[..] $T, items: [] T, index: int) {
     assert(index <= array.count);
     if !items.count return;
 
-    maybe_grow(xx array, items.count * size_of(T));
+    array_reserve(array, array.count + items.count);
 
     array.count += items.count;
 
@@ -5182,3 +5185,4 @@ System :: #import "System";
 #import "Clipboard";
 #import "Pool";
 Hash :: #import "Hash";
+Default_Allocator :: #import "Default_Allocator";
