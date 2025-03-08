@@ -1,5 +1,3 @@
-EXE_NAME :: "log_viewer";
-
 /*
 
 TODO:
@@ -5167,11 +5165,6 @@ run_tests :: () {
 
 WANTED_MSAA :: 8;
 
-#run {
-    #import "Compiler";
-    set_build_options_dc(.{ output_executable_name = EXE_NAME });
-}
-
 #import "Basic";
 #import "String";
 #import "Math";
@@ -5186,3 +5179,4 @@ System :: #import "System";
 #import "Pool";
 Hash :: #import "Hash";
 Default_Allocator :: #import "Default_Allocator";
+#import "Compiler";
