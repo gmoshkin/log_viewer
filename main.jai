@@ -365,6 +365,8 @@ update_and_draw_frame :: () -> bool {
     } else if (the_popup_text_input.flags & .OPEN) && axis_aligned_rectangle_contains(rectangle_of(*the_popup_text_input), mouse) {
         mouse_focus = .POPUP_TEXT_INPUT;
     } else if (the_text_search_ui.flags & .OPEN) && axis_aligned_rectangle_contains(the_text_search_ui.rect, mouse) {
+        // @BROKEN search ui buttons no longer work!!!
+        // TODO do_text_search_ui(do_draw=false);
         mouse_focus = .TEXT_SEARCH_UI;
     } else {
         anchor_kind := hovered_scroll_bar_anchor_kind;
@@ -1397,6 +1399,11 @@ Log_Text_Buffer :: struct {
     all_log_levels: [..] u8;
 
     escape_code_infos: [..] Escape_Code_Info;
+
+    // string owned by `all_text`
+    all_words: Table(string, int);
+    // string owned by `all_text`
+    message_words: Table(string, int);
 }
 the_text_buffer: Log_Text_Buffer;
 
@@ -1423,6 +1430,11 @@ reset_text_buffer :: (using buffer: *Log_Text_Buffer) {
     array_reset_keeping_memory(*all_fiber_ids);
 
     array_reset_keeping_memory(*escape_code_infos);
+
+    // keeps memory
+    table_reset(*all_words);
+    // keeps memory
+    table_reset(*message_words);
 }
 
 get_line :: (using buffer: *Log_Text_Buffer, line_index: int) -> string {
@@ -1456,7 +1468,9 @@ load_text_buffer_data :: (buffer: *Log_Text_Buffer, from_clipboard := false) {
     free(buffer.all_text);
     buffer.all_text = new_data;
 
+    Profile();
     process_text_buffer_data(buffer);
+    Profile("process_text_buffer_data");
 }
 
 process_text_buffer_data :: (using buffer: *Log_Text_Buffer) {
@@ -1521,6 +1535,10 @@ process_text_buffer_data :: (using buffer: *Log_Text_Buffer) {
     log("line count: %", line_infos.count);
     log("max line length: %", max_line_length);
     log("escape code count: % (% unique)", escape_code_infos.count, escape_code_stats.count);
+    log("unique word count: %", all_words.count);
+    for all_words {
+        log("    %: %", it_index, it);
+    }
 
     // for escape_code_stats {
     //     log("'%': %, seen % times", cast(Ascii_Or_Hex) it_index, parse_escape_sequence(it_index), it);
@@ -1561,7 +1579,9 @@ remove_line_range :: (using buffer: *Log_Text_Buffer, first_line: s64, last_line
     memcpy(all_text.data + start, all_text.data + end, moved);
     all_text.count -= removed;
 
+    Profile();
     process_text_buffer_data(buffer);
+    Profile("process_text_buffer_data");
 }
 
 //
@@ -1658,7 +1678,12 @@ get_all_entities_of_type :: (buffer: *Log_Text_Buffer, type: Log_Info_Piece_Type
                 array_add(*result, s);
             }
             return result;
-        case .MESSAGE; return .[];
+        case .MESSAGE;
+            result := resizable_array(string, buffer.message_words.count,, temp);
+            for buffer.message_words {
+                array_add(*result, it_index);
+            }
+            return result;
     }
 }
 
@@ -1732,6 +1757,8 @@ info_contains :: (info: *Log_Line_Info, piece: Log_Info_Piece_Type) -> bool {
 
 parse_log_line :: (buffer: *Log_Text_Buffer, line: string, info: *Log_Line_Info) -> bool {
     cursor := 0;
+
+    remember_words(line, *buffer.all_words);
 
     // skip whitespace
     while (cursor < line.count) && (inline is_space(line[cursor])) cursor += 1;
@@ -1946,7 +1973,43 @@ parse_log_line :: (buffer: *Log_Text_Buffer, line: string, info: *Log_Line_Info)
 
     info.message_start = xx cursor;
 
+    remember_words(advance(line, cursor), *buffer.message_words);
+
     return true;
+}
+
+remember_words :: (text: string, all_words: *Table(string, int)) {
+    mark := get_temporary_storage_mark();
+    defer set_temporary_storage_mark(mark);
+
+    new_words: [..] string;
+    new_words.allocator = temp;
+
+    cursor := 0;
+    while cursor < text.count {
+        // skip whitespace & punctuation
+        while (cursor < text.count) && !(inline is_alnum(text[cursor])) { cursor += 1; }
+
+        word_start := cursor;
+        // find word end
+        while (cursor < text.count) && (inline is_alnum(text[cursor])) { cursor += 1; }
+
+        if word_start != cursor {
+            word := slice(text, word_start, cursor - word_start);
+            array_add(*new_words, word);
+        }
+    }
+
+    for new_words {
+        word := it;
+        // has_alpha := false;
+        // for word {
+        //     if inline is_alpha(it) { has_alpha = true; break; }
+        // }
+        // if !has_alpha continue;
+
+        find_or_add(all_words, word).* += 1;
+    }
 }
 
 parse_fiber_name_and_the_rest_of_the_garbage :: (text: string) -> (fiber_name: string, module: string, location: string) {
@@ -2337,11 +2400,43 @@ parse_search_string :: (text: string, buffer: *Log_Text_Buffer = null) -> (Searc
 parse_search_query_leaf :: (text: string, buffer: *Log_Text_Buffer = null) -> (Search_Query_Leaf, ok: bool, completions: Completions, cursor: int) {
     cursor := 0;
 
+    completions: [..] string;
+    completions.allocator = temp;
+
     // skip spaces
     while (cursor < text.count) && (inline is_space(text[cursor])) cursor += 1;
     if cursor == text.count return .{}, false, .{}, cursor;
 
-    if text[cursor] != #char "$" return .{}, false, .{}, cursor;
+    if text[cursor] != #char "$" {
+        // simple text search, find completions for the last word
+
+        last_word := "";
+
+        // find last word
+        while cursor < text.count {
+            // skip spaces & punctuation
+            while (cursor < text.count) && !(inline is_alnum(text[cursor])) cursor += 1;
+
+            word_start := cursor;
+            // skip word
+            while (cursor < text.count) && (inline is_alnum(text[cursor])) cursor += 1;
+
+            if word_start != cursor {
+                last_word = slice(text, word_start, cursor - word_start);
+            }
+        }
+
+        // find completions
+        inline array_reset_keeping_memory(*completions);
+        for buffer.all_words {
+            // TODO to_lower_copy?
+            if !starts_with(it_index, last_word) continue;
+
+            array_add(*completions, it_index,, temp);
+        }
+
+        return .{}, false, .{completions, last_word.count}, cursor;
+    }
     cursor += 1;
 
     type_start := cursor;
@@ -2352,9 +2447,6 @@ parse_search_query_leaf :: (text: string, buffer: *Log_Text_Buffer = null) -> (S
     }
 
     result: Search_Query_Leaf;
-
-    completions: [..] string;
-    completions.allocator = temp;
 
     type_string := slice(text, type_start, cursor - type_start);
     match := false;
@@ -4742,7 +4834,7 @@ hex_color :: ($hex: string, $loc := #caller_location) -> Vector4 #expand {
         result, ok := parse_hex_color(hex);
         assert(ok, "'%' is not a hex color", hex, loc=loc);
         context.logger = my_logger;
-        log("hex_color(\"%\") = %", hex, result, loc=loc);
+        // log("hex_color(\"%\") = %", hex, result, loc=loc);
         return result;
     };
 }
@@ -4792,6 +4884,13 @@ resizable_array :: (items: [] $T) -> [..] T {
     result: [..] T;
     result.allocator = context.allocator;
     array_add(*result, .. items);
+    return result;
+}
+
+resizable_array :: ($T: Type, reserve: int) -> [..] T {
+    result: [..] T;
+    result.allocator = context.allocator;
+    array_reserve(*result, reserve);
     return result;
 }
 
@@ -4990,6 +5089,10 @@ last :: (array: [] $T) -> T #expand {
 is_lower :: (s: string) -> bool {
     for s if (it < #char "a") || (it > #char "z") return false;
     return true;
+}
+
+is_upper :: inline (c: u8) -> bool {
+    return c >= #char "A" && c <= #char "Z";
 }
 
 fmt :: (v: float64, trailing_width := 1) -> FormatFloat #expand {
