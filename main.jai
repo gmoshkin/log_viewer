@@ -113,11 +113,24 @@ main :: () {
 
 window: Window_Type;
 window_size: Vector2;
+window_rect: Rectangle;
 mouse: Vector2;
 mouse_last_frame: Vector2;
 mouse_at_click: Vector2;
-mouse_event_handled: bool;
-window_rect: Rectangle;
+
+mouse_focus: enum {
+    NONE;
+    SCROLL_BAR_SLIDER;
+    SCROLL_BAR;
+    SCROLL_BAR_ANCHOR;
+    POPUP_TEXT_INPUT;
+    POPUP_MENU;
+    TEXT_SEARCH_UI;
+    MAIN_TEXT_PANE;
+    ANCHOR_BUTTONS;
+}
+
+Mouse_Interaction :: enum_flags { CLICK; HOVER; }
 
 assets_directory: string;
 
@@ -209,7 +222,10 @@ update_and_draw_frame :: () -> bool {
         }
     }
     defer mouse_last_frame = mouse;
-    mouse_event_handled = false;
+    mouse_click_any := is_click(.MOUSE_BUTTON_LEFT) || is_click(.MOUSE_BUTTON_MIDDLE) || is_click(.MOUSE_BUTTON_RIGHT);
+    if mouse_click_any {
+        mouse_at_click = mouse;
+    }
 
     //
     // update rectangles dependent on window size
@@ -279,6 +295,25 @@ update_and_draw_frame :: () -> bool {
     old_main_font_pixel_height := main_font.pixel_height;
 
     //
+    // update mouse focus (if possible, other ui elements are handled elsewhere)
+    //
+    mouse_focus = .NONE;
+    if draggin_scroll_bar {
+        mouse_focus = .SCROLL_BAR_SLIDER;
+    } else if (the_popup_menu.flags & .OPEN) && axis_aligned_rectangle_contains(rectangle_of(*the_popup_menu), mouse) {
+        mouse_focus = .POPUP_MENU;
+    } else if (the_popup_text_input.flags & .OPEN) && axis_aligned_rectangle_contains(rectangle_of(*the_popup_text_input), mouse) {
+        mouse_focus = .POPUP_TEXT_INPUT;
+    } else if (the_text_search_ui.flags & .OPEN) && axis_aligned_rectangle_contains(the_text_search_ui.rect, mouse) {
+        mouse_focus = .TEXT_SEARCH_UI;
+    } else {
+        // then scroll bar anchor are checked after input events are handled,
+        // although maybe they should be checked here
+        //
+        // after that the rest of the rects
+    }
+
+    //
     // handle input events
     //
 
@@ -296,34 +331,6 @@ update_and_draw_frame :: () -> bool {
 
         else if it.key_pressed && it.key_code == .F4 && it.alt_pressed {
             should_quit = true;
-        }
-
-        else if it.key_code == .MOUSE_BUTTON_LEFT && it.key_pressed {
-            request_redraw("mouse left click");
-            mouse_at_click = mouse;
-
-            if the_popup_text_input.flags & .OPEN && !axis_aligned_rectangle_contains(rectangle_of(*the_popup_text_input), mouse) {
-                close_popup_text_input(*the_popup_text_input);
-            }
-
-        } else if draggin_scroll_bar && it.key_code == .MOUSE_BUTTON_LEFT && !it.key_pressed {
-            request_redraw("stopped draggin scroll bar");
-        } else if it.key_code == .MOUSE_BUTTON_RIGHT && it.key_pressed {
-            request_redraw("mouse right click");
-            mouse_at_click = mouse;
-
-            if the_popup_text_input.flags & .OPEN && !axis_aligned_rectangle_contains(rectangle_of(*the_popup_text_input), mouse) {
-                close_popup_text_input(*the_popup_text_input);
-            }
-
-        } else if it.key_code == .MOUSE_BUTTON_MIDDLE && it.key_pressed {
-            request_redraw("mouse middle click");
-            mouse_at_click = mouse;
-
-            if the_popup_text_input.flags & .OPEN && !axis_aligned_rectangle_contains(rectangle_of(*the_popup_text_input), mouse) {
-                close_popup_text_input(*the_popup_text_input);
-            }
-
         }
 
         // modules/Input doesn't set it.ctrl_pressed for MOUSE_WHEEL :(
@@ -431,31 +438,31 @@ update_and_draw_frame :: () -> bool {
     // reset these before doing popup menu, because popup menu sets these up
     for *active_anchor_segment it.line_index = -1;
 
-    // update the popup menu
-    {
-        menu := *the_popup_menu;
-        if !draggin_scroll_bar && menu.flags & .OPEN {
-            menu.flags &= ~.HAS_MOUSE_FOCUS;
-            handled := do_popup_menu(menu, mouse, handle_click=true, do_draw=false);
-            if is_click(.MOUSE_BUTTON_LEFT) && !handled {
-                menu.flags &= ~.OPEN;
-                request_redraw("popup menu closed");
-            }
-            mouse_event_handled ||= handled;
-        }
+    // update the popup menu (close only)
+    if mouse_focus != .POPUP_MENU && the_popup_menu.flags & .OPEN && mouse_click_any {
+        the_popup_menu.flags & ~.OPEN;
+        request_redraw("popup menu closed");
+    }
+
+    // update popup text input (close only)
+    if mouse_focus != .POPUP_TEXT_INPUT && the_popup_text_input.flags & .OPEN && mouse_click_any {
+        close_popup_text_input(*the_popup_text_input);
+        request_redraw("popup text input closed");
     }
 
     //
     // drag scroll bar
     //
     if draggin_scroll_bar {
-        mouse_event_handled = true;
         mouse_moved := mouse.y - mouse_at_click.y;
         scroll_rows = scroll_rows_at_click - xx (mouse_moved * lines_per_scroll_bar_pixel);
         scroll_rows = clamp(scroll_rows, 0, total_line_count - text_pane_row_count / 2.0);
         target_scroll_rows = scroll_rows;
 
-        if !is_down(.MOUSE_BUTTON_LEFT) draggin_scroll_bar = false;
+        if !is_down(.MOUSE_BUTTON_LEFT) {
+            draggin_scroll_bar = false;
+            request_redraw("stopped draggin scroll bar");
+        }
 
         if mouse != mouse_last_frame {
             request_redraw(tprint("scroll at %", #line));
@@ -466,9 +473,10 @@ update_and_draw_frame :: () -> bool {
     // update anchor buttons
     //
     {
-        if !mouse_event_handled && !has_focus(*the_popup_menu) && axis_aligned_rectangle_contains(left_column_rect, mouse) {
+        if (mouse_focus == .NONE) && axis_aligned_rectangle_contains(left_column_rect, mouse) {
             hover_line_index := screen_position_to_line_index(left_column_rect, mouse.y);
             if hover_line_index >= 0 {
+                mouse_focus = .ANCHOR_BUTTONS;
                 if hover_line_index != hovered_anchor_button_line {
                     hovered_anchor_button_line = hover_line_index;
                     request_redraw(tprint("anchor buttons at %", #line));
@@ -494,16 +502,18 @@ update_and_draw_frame :: () -> bool {
     //
     // update scroll bar anchors
     //
-    if !mouse_event_handled && !has_focus(*the_popup_menu) {
+    if mouse_focus == .NONE {
         anchor_kind := hovered_scroll_bar_anchor_kind;
         // I'm not actually sure this is needed...
         mouse_in_rect := mouse - .{xx scroll_bar_rect.left, xx bottom(scroll_bar_rect)};
         anchor_index := do_scroll_bar_anchors(scroll_bar_rect, explicit_anchors, anchor_button_active_color, .GET_HOVER, mouse_in_rect, t=15);
         if anchor_index != -1 {
             anchor_kind = .EXPLICIT;
+            mouse_focus = .SCROLL_BAR_ANCHOR;
         } else {
             anchor_index = do_scroll_bar_anchors(scroll_bar_rect, search_results.matches, search_match_color, .GET_HOVER, mouse_in_rect);
             anchor_kind = .SEARCH_MATCH;
+            mouse_focus = .SCROLL_BAR_ANCHOR;
         }
 
         if anchor_index != -1 {
@@ -539,6 +549,10 @@ update_and_draw_frame :: () -> bool {
         }
     }
 
+    if mouse_focus == .NONE && axis_aligned_rectangle_contains(text_pane_rect, mouse) {
+        mouse_focus == .MAIN_TEXT_PANE;
+    }
+
     ////////////////////////////////////////////////////////////////////////////
     // @TEMPORARY!!!
     if mouse_last_frame != mouse {
@@ -566,7 +580,9 @@ update_and_draw_frame :: () -> bool {
     // draw text pane
     {
         profile_t0 = seconds_since_init();
-        draw_the_text_pane(*the_text_buffer, text_pane_rect);
+        handle_mouse: Mouse_Interaction;
+
+        draw_the_text_pane(*the_text_buffer, text_pane_rect, handle_click);
         Profile("draw_the_text_pane");
 
         // draw the side bars to fix the ugly text bleed over
@@ -674,7 +690,6 @@ update_and_draw_frame :: () -> bool {
         mouse_over_slider := axis_aligned_rectangle_contains(xx x, xx y, xx w, xx h, mouse);
         if is_click(.MOUSE_BUTTON_LEFT) && mouse_over_slider {
             draggin_scroll_bar = true;
-            mouse_event_handled = true;
             scroll_rows_at_click = scroll_rows;
             request_redraw(tprint("scroll bar at %", #line));
         }
@@ -756,11 +771,12 @@ update_and_draw_frame :: () -> bool {
             y := rect.top - scroll_y - h;
             draw_hollow_axis_aligned_rectangle(xx (x + x_pad - 1), y, xx (w - 2 * x_pad), xx h, 2, color);
         }
+    }
 
-        if the_text_search_ui.flags & .OPEN {
-            handled := draw_text_search_ui(*the_text_search_ui, main_font, handle_click=!mouse_event_handled);
-            mouse_event_handled ||= handled;
-        }
+    // draw the text search ui
+    if the_text_search_ui.flags & .OPEN {
+        handle_click := (mouse_focus == .TEXT_SEARCH_UI);
+        draw_text_search_ui(*the_text_search_ui, main_font, handle_click);
     }
 
     // draw the popup text input
@@ -770,7 +786,8 @@ update_and_draw_frame :: () -> bool {
 
     // draw the popup menu
     if the_popup_menu.flags & .OPEN {
-        do_popup_menu(*the_popup_menu, mouse, handle_click=false, do_draw=true);
+        handle_mouse := ifx (mouse_focus == .POPUP_MENU) then (.HOVER | .CLICK);
+        do_popup_menu(*the_popup_menu, mouse, handle_mouse, do_draw=true);
     }
 
     // debuggin pane
@@ -784,20 +801,10 @@ update_and_draw_frame :: () -> bool {
         elapsed := seconds_since_init() - t0;
         print(*builder, "% %\n", frame_counter, fmt(elapsed, 6));
         print(*builder, "scroll: %, %\n", fmt(scroll_columns, 1), fmt(scroll_rows, 1));
+        print(*builder, "mouse focus: %\n", mouse_focus):
         if the_text_search_ui.flags & .OPEN print(*builder, "search matches: %\n", search_results.matches.count);
         if hovered_scroll_bar_anchor_index != -1 then print(*builder, "% %\n", hovered_scroll_bar_anchor_kind, hovered_scroll_bar_anchor_index);
-        print(*builder, "t min: ");
-        if global_time_range_min != APOLLO_TIME_INVALID then print_time_for_log(*builder, to_calendar(global_time_range_min));
-                                                        else print(*builder, "?");
-        print(*builder, "\n");
-        print(*builder, "t cur: ");
-        if global_time_current_line != APOLLO_TIME_INVALID then print_time_for_log(*builder, to_calendar(global_time_current_line));
-                                                           else print(*builder, "?");
-        print(*builder, "\n");
-        print(*builder, "t max: ");
-        if global_time_range_max != APOLLO_TIME_INVALID then print_time_for_log(*builder, to_calendar(global_time_range_max));
-                                                        else print(*builder, "?");
-        print(*builder, "\n");
+
 
         if the_text_search_ui.completions.values {
             print(*builder, "matched prefix: %\n", the_text_search_ui.completions.matched_prefix_length);
@@ -947,9 +954,11 @@ global_time_range_min := APOLLO_TIME_INVALID;
 global_time_range_max := APOLLO_TIME_INVALID;
 global_time_current_line := APOLLO_TIME_INVALID;
 
-draw_the_text_pane :: (buffer: *Log_Text_Buffer, rect: Rectangle) {
+draw_the_text_pane :: (buffer: *Log_Text_Buffer, rect: Rectangle, handle_mouse: Mouse_Interaction) -> mouse_handled: Mouse_Interaction {
     text_color       := main_text_pane_text_color;
     background_color := main_text_pane_background_color;
+
+    event_out: Mouse_Interaction;
 
     // background
     {
@@ -970,7 +979,7 @@ draw_the_text_pane :: (buffer: *Log_Text_Buffer, rect: Rectangle) {
     }
 
     hover_line_index := -1;
-    if !has_focus(*the_popup_menu) && axis_aligned_rectangle_contains(rect, mouse) {
+    if (handle_mouse & .HOVER) {
         hover_line_index = screen_position_to_line_index(rect, mouse.y);
     }
 
@@ -1008,7 +1017,10 @@ draw_the_text_pane :: (buffer: *Log_Text_Buffer, rect: Rectangle) {
             first_line = min(first_line, line_index);
             last_line = max(last_line, line_index);
 
-            if line_index == hover_line_index then do_structured_log_info(buffer, info, line_index, rect, mouse, .{x, y});
+            if line_index == hover_line_index {
+                click_handled := do_structured_log_info(buffer, info, line_index, rect, mouse, .{x, y}, handle_mouse & .CLICK);
+                if click_handled then event_out |= .CLICK;
+            }
 
             // handle log line info
             color := text_color;
@@ -1151,9 +1163,11 @@ draw_the_text_pane :: (buffer: *Log_Text_Buffer, rect: Rectangle) {
             x_prev, y_prev = x, y;
         }
     }
+
+    return click_handled;
 }
 
-do_structured_log_info :: (buffer: *Log_Text_Buffer, info: *Log_Line_Info, line_index: int, parent_rect: Rectangle, mouse: Vector2, origin: Vector2) {
+do_structured_log_info :: (buffer: *Log_Text_Buffer, info: *Log_Line_Info, line_index: int, parent_rect: Rectangle, mouse: Vector2, origin: Vector2, handle_click: bool) -> click_handled: bool {
     for type_info(Log_Info_Piece_Type).values {
         type := cast(Log_Info_Piece_Type) it;
         if !info_contains(info, type) continue;
@@ -1174,11 +1188,14 @@ do_structured_log_info :: (buffer: *Log_Text_Buffer, info: *Log_Line_Info, line_
             w := x_end - x_start;
             draw_hollow_axis_aligned_rectangle(xx x_start, xx origin.y, xx w, xx main_font.line_height, 2, color_gray);
 
-            if !mouse_event_handled && is_click(.MOUSE_BUTTON_RIGHT) {
+            if handle_click && is_click(.MOUSE_BUTTON_RIGHT) {
                 log_info_open_popup_menu(info, mouse, line_index, type);
+                return true;
             }
         }
     }
+
+    return false;
 }
 
 draw_text_line_with_ansi_escape_codes :: (font_set: My_Dynamic_Font, text: string,
@@ -2952,7 +2969,7 @@ Popup_Menu :: struct {
     left: float;
     items: [..] Popup_Menu_Item;
     hovered_item: s16 = -1;
-    flags: enum_flags { OPEN; HAS_MOUSE_FOCUS; };
+    flags: enum_flags { OPEN; };
 
     callback: Callback;
     callback_data: Any;
@@ -2992,10 +3009,6 @@ popup_menu_hovered_item_bg_color :: #run hex_color("505050");
 popup_menu_item_bg_color :: text_search_ui_background_color;
 popup_menu_item_text_color :: main_text_pane_text_color;
 
-has_focus :: (menu: *Popup_Menu) -> bool #expand {
-    return menu.flags & .HAS_MOUSE_FOCUS != 0;
-}
-
 open_the_popup_menu :: inline (at: Vector2, callback: Popup_Menu.Callback) -> *Popup_Menu {
     return open_the_popup_menu(at, callback, null);
 }
@@ -3034,20 +3047,74 @@ popup_menu_handle_click :: (menu: *Popup_Menu) {
         menu.callback(menu, .CLICK);
     }
 
-    menu.flags &= ~(.OPEN | .HAS_MOUSE_FOCUS);
+    menu.flags &= ~.OPEN;
 }
 
-do_popup_menu :: (menu: *Popup_Menu, mouse: Vector2, handle_click: bool, $do_draw := false) -> input_handled: bool {
+do_popup_menu :: (menu: *Popup_Menu, mouse: Vector2, handle_mouse: Mouse_Interaction, $do_draw := false) -> mouse_handled: Mouse_Interaction {
     if !menu.items {
         // Somebody opened an empty menu, just close it immediately
-        menu.flags &= ~(.OPEN | .HAS_MOUSE_FOCUS);
-        return false;
+        menu.flags &= ~.OPEN;
+        return 0;
     }
 
     font := ui_font;
     assert(menu.flags & .OPEN != 0);
 
     text_color := main_text_pane_text_color;
+
+    h := font.line_height;
+    text_y_tweak := -(font.typical_descender + font.max_descender) / 2;
+    x_pad := text_y_tweak;
+    text_x_tweak := h + x_pad;
+
+    rect := rectangle_of(menu);
+
+    //
+    // draw background rect
+    //
+    #if do_draw {
+        draw_axis_aligned_rectangle(rect, popup_menu_item_bg_color);
+        draw_hollow_axis_aligned_rectangle(rect.left - b, bottom(rect) - b, rect.width + 2 * b, rect.height + 2 * b, b, popup_menu_border_color);
+    }
+
+    event_out: Mouse_Interaction;
+    click := (handle_mouse & .CLICK) && is_click(.MOUSE_BUTTON_LEFT);
+
+    // draw the text
+    x := menu.left;
+    y_top := menu.top;
+    for menu.items {
+        y_bottom := y_top - h;
+        defer y_top = y_bottom;
+
+        hover := false;
+        if (handle_mouse & .HOVER) && (mouse.y >= y_bottom && mouse.y < y_top) {
+            hover = true;
+            menu.hovered_item = xx it_index;
+            if click {
+                popup_menu_handle_click(menu);
+                event_out |= .CLICK;
+            } else if menu.callback {
+                menu.callback(menu, .HOVER);
+            }
+        }
+
+        #if do_draw {
+            if hover {
+                draw_axis_aligned_rectangle(xx x, xx y_bottom, xx rect.width, xx h, popup_menu_hovered_item_bg_color);
+            }
+
+            draw_icon(x + h / 2.0, y_bottom + h / 2.0, it.icon);
+
+            Simp.draw_text(font.regular, xx x + text_x_tweak, xx y_bottom + text_y_tweak, it.text, popup_menu_item_text_color);
+        }
+    }
+
+    return event_out;
+}
+
+rectangle_of :: (menu: *Popup_Menu) -> Rectangle {
+    font := ui_font;
 
     h := font.line_height;
     text_y_tweak := -(font.typical_descender + font.max_descender) / 2;
@@ -3061,6 +3128,7 @@ do_popup_menu :: (menu: *Popup_Menu, mouse: Vector2, handle_click: bool, $do_dra
     }
 
     b := popup_menu_border_width;
+
     X := menu.left;
     H := h * menu.items.count;
     Y := menu.top - H + 1;
@@ -3071,52 +3139,13 @@ do_popup_menu :: (menu: *Popup_Menu, mouse: Vector2, handle_click: bool, $do_dra
     overflow = 0 - (X - b);                 if overflow > 0 { menu.left += overflow; X += overflow; }
     overflow = (X + W + b) - window_size.x; if overflow > 0 { menu.left -= overflow; X -= overflow; }
 
-    //
-    // draw background rect
-    //
-    #if do_draw {
-        draw_axis_aligned_rectangle(xx X, xx Y, xx W, xx H, popup_menu_item_bg_color);
-        draw_hollow_axis_aligned_rectangle(X - b, Y - b, W + 2 * b, H + 2 * b, b, popup_menu_border_color);
-    }
+    rect: Rectangle;
+    rect.left = xx X;
+    rect.width = xx W;
+    rect.height = xx H;
+    rect.top = Y + H;
 
-    click := handle_click && is_click(.MOUSE_BUTTON_LEFT);
-    if axis_aligned_rectangle_contains(X, Y, xx W, xx H, mouse) {
-        menu.flags |= .HAS_MOUSE_FOCUS;
-    }
-
-    handled := false;
-
-    // draw the text
-    x := menu.left;
-    y_top := menu.top;
-    for menu.items {
-        y_bottom := y_top - h;
-        defer y_top = y_bottom;
-
-        hover := false;
-        if has_focus(menu) && (mouse.y >= y_bottom && mouse.y < y_top) {
-            hover = true;
-            menu.hovered_item = xx it_index;
-            if click {
-                popup_menu_handle_click(menu);
-                handled = true;
-            } else if menu.callback {
-                menu.callback(menu, .HOVER);
-            }
-        }
-
-        #if do_draw {
-            if hover {
-                draw_axis_aligned_rectangle(xx X, xx y_bottom, xx W, xx h, popup_menu_hovered_item_bg_color);
-            }
-
-            draw_icon(x + h / 2.0, y_bottom + h / 2.0, it.icon);
-
-            Simp.draw_text(font.regular, xx x + text_x_tweak, xx y_bottom + text_y_tweak, it.text, popup_menu_item_text_color);
-        }
-    }
-
-    return handled;
+    return rect;
 }
 
 Point_Relative_To :: enum {
@@ -3241,7 +3270,7 @@ Popup_Text_Input :: struct {
     minimum_width: float;
     height: float;
     direction: Adjust_Direction;
-    flags: enum_flags { OPEN; HAS_MOUSE_FOCUS; };
+    flags: enum_flags { OPEN; };
 
     border_width :: 1.0;
 
