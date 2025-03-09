@@ -91,6 +91,7 @@ main :: () {
 
     reload_main_font();
     load_font("Roboto", *ui_font);
+    load_font("Codetta", *ui_mono_font);
 
     msaa := Simp.prepare_window(window, wanted_msaa = WANTED_MSAA);
     Simp.set_render_target(window);
@@ -147,6 +148,10 @@ request_redraw :: (reason: string, loc := #caller_location) {
 main_font_default_pixel_height :: 14;
 main_font := My_Dynamic_Font.{
     pixel_height = main_font_default_pixel_height,
+};
+
+ui_mono_font := My_Dynamic_Font.{
+    pixel_height = 14,
 };
 
 ui_font := My_Dynamic_Font.{
@@ -364,9 +369,7 @@ update_and_draw_frame :: () -> bool {
         mouse_focus = .POPUP_MENU;
     } else if (the_popup_text_input.flags & .OPEN) && axis_aligned_rectangle_contains(rectangle_of(*the_popup_text_input), mouse) {
         mouse_focus = .POPUP_TEXT_INPUT;
-    } else if (the_text_search_ui.flags & .OPEN) && axis_aligned_rectangle_contains(the_text_search_ui.rect, mouse) {
-        // @BROKEN search ui buttons no longer work!!!
-        // TODO do_text_search_ui(do_draw=false);
+    } else if (the_text_search_ui.flags & .OPEN) && do_text_search_ui(*the_text_search_ui, ui_mono_font, mouse, false, do_draw=false) & .HOVER {
         mouse_focus = .TEXT_SEARCH_UI;
     } else {
         anchor_kind := hovered_scroll_bar_anchor_kind;
@@ -796,8 +799,8 @@ update_and_draw_frame :: () -> bool {
 
     // draw the text search ui
     if the_text_search_ui.flags & .OPEN {
-        handle_click := (mouse_focus == .TEXT_SEARCH_UI);
-        draw_text_search_ui(*the_text_search_ui, main_font, handle_click);
+        handle_mouse := (mouse_focus == .TEXT_SEARCH_UI);
+        do_text_search_ui(*the_text_search_ui, main_font, mouse, handle_mouse, do_draw=true);
     }
 
     // draw the popup text input
@@ -2853,7 +2856,7 @@ jump_to_next_search_match :: (forwards: bool) {
     }
 }
 
-draw_text_search_ui :: (using ui: *Text_Search_UI, font: My_Dynamic_Font, handle_click: bool) -> click_handled: bool {
+do_text_search_ui :: (using ui: *Text_Search_UI, font: My_Dynamic_Font, mouse: Vector2, handle_mouse: bool, $do_draw: bool) -> mouse_handled: Mouse_Interaction {
     draw_axis_aligned_rectangle(rect, text_search_ui_background_color);
     draw_hollow_axis_aligned_rectangle(xx rect.left, xx bottom(rect), xx rect.width, xx rect.height,
                                        border = text_search_ui_border_width, text_search_ui_border_color);
@@ -2864,7 +2867,15 @@ draw_text_search_ui :: (using ui: *Text_Search_UI, font: My_Dynamic_Font, handle
     text_x := rect.left + text_x_tweak;
     text_y := bottom(rect) + text_y_tweak;
 
-    click_handled := draw_text_input(*text_input, rect, text_x, text_y, font.regular, text_search_ui_text_color, handle_click);
+    event_out: Mouse_Interaction;
+    if axis_aligned_rectangle_contains(rect, mouse) {
+        event_out |= .HOVER;
+    }
+
+    #if do_draw {
+        click_handled := draw_text_input(*text_input, rect, text_x, text_y, font.regular, text_search_ui_text_color, handle_mouse);
+        if click_handled then event_out |= .CLICK;
+    }
 
     // do buttons
     if search_results.matches {
@@ -2877,21 +2888,21 @@ draw_text_search_ui :: (using ui: *Text_Search_UI, font: My_Dynamic_Font, handle
         x := right(rect) + pad;
         y := cast(float) bottom(rect);
 
-        click := do_simple_button(x, y, size, size, border_width, Icon_Info.{fg_color, size * .6, .TRIANGLE_LEFT}, bg_color, handle_click);
-        if click {
+        handled := do_simple_button(x, y, size, size, border_width, Icon_Info.{fg_color, size * .6, .TRIANGLE_LEFT}, bg_color, mouse, handle_mouse, do_draw);
+        if handled & .CLICK {
             jump_to_next_search_match(forwards=false);
-            click_handled = true;
         }
+        event_out |= handled;
 
         x += size + pad;
-        click = do_simple_button(x, y, size, size, border_width, Icon_Info.{fg_color, size * .6, .TRIANGLE_RIGHT}, bg_color, handle_click);
-        if click {
+        handled = do_simple_button(x, y, size, size, border_width, Icon_Info.{fg_color, size * .6, .TRIANGLE_RIGHT}, bg_color, mouse, handle_mouse, do_draw);
+        if handled & .CLICK {
             jump_to_next_search_match(forwards=true);
-            click_handled = true;
         }
+        event_out |= handled;
     }
 
-    return click_handled;
+    return event_out;
 }
 
 //
@@ -3303,30 +3314,33 @@ draw_simple_text_pane :: (parent_rect: Rectangle, font: *Simp.Dynamic_Font, poin
     }
 }
 
-do_simple_button :: (x: float, y: float, w: float, h: float, border: float, icon: Icon_Info, bg_color: Vector4, handle_click: bool) -> handled_click: bool {
+do_simple_button :: (x: float, y: float, w: float, h: float, border: float, icon: Icon_Info, bg_color: Vector4, mouse: Vector2, handle_mouse: bool, $do_draw: bool) -> handled: Mouse_Interaction {
     pad := border;
 
     fg_color_ := icon.color;
     bg_color_ := bg_color;
 
-    click_handled := false;
+    event_out: Mouse_Interaction;
+    if axis_aligned_rectangle_contains(x, y, w, h, mouse) {
+        event_out |= .HOVER;
 
-    if handle_click && axis_aligned_rectangle_contains(x, y, w, h, mouse) {
         Swap(*fg_color_, *bg_color_);
 
-        if is_click(.MOUSE_BUTTON_LEFT) {
-            click_handled = true;
+        if handle_mouse && is_click(.MOUSE_BUTTON_LEFT) {
+            event_out |= .CLICK;
         }
     }
 
-    draw_axis_aligned_rectangle(x, y, w, h, bg_color_);
-    draw_hollow_axis_aligned_rectangle(x, y, w, h, border, text_search_ui_border_color);
+    #if do_draw {
+        draw_axis_aligned_rectangle(x, y, w, h, bg_color_);
+        draw_hollow_axis_aligned_rectangle(x, y, w, h, border, text_search_ui_border_color);
 
-    icon_ := icon;
-    icon_.color = fg_color_;
-    draw_icon(x + w / 2.0, y + h / 2.0, icon_);
+        icon_ := icon;
+        icon_.color = fg_color_;
+        draw_icon(x + w / 2.0, y + h / 2.0, icon_);
+    }
 
-    return click_handled;
+    return event_out;
 }
 
 draw_icon :: (x: float, y: float, icon: Icon_Info) {
