@@ -128,6 +128,7 @@ mouse_focus: enum {
     TEXT_SEARCH_UI;
     MAIN_TEXT_PANE;
     ANCHOR_BUTTONS;
+    LEFT_COLUMN;
 }
 
 Mouse_Interaction :: enum_flags { CLICK; HOVER; }
@@ -168,6 +169,7 @@ window_bg_color :: #run hex_color("191919");
 
 draggin_scroll_bar := false;
 scroll_bar_rect: Rectangle;
+scroll_bar_slider_rect: Rectangle;
 scroll_bar_pad := 1;
 scroll_bar_slider_color := #run hex_color("d0d0d0");
 scroll_bar_anchor_min_width := 1.7;
@@ -203,6 +205,7 @@ update_and_draw_frame :: () -> bool {
 
     should_quit := false;
 
+
     Input.update_window_events();
 
     for Input.get_window_resizes() {
@@ -225,7 +228,18 @@ update_and_draw_frame :: () -> bool {
     mouse_click_any := is_click(.MOUSE_BUTTON_LEFT) || is_click(.MOUSE_BUTTON_MIDDLE) || is_click(.MOUSE_BUTTON_RIGHT);
     if mouse_click_any {
         mouse_at_click = mouse;
+        request_redraw("mouse click");
     }
+
+    //
+    // reset temporary values
+    //
+
+    // reset these before doing popup menu, because popup menu sets these up
+    for *active_anchor_segment it.line_index = -1;
+
+    old_main_font_pixel_height := main_font.pixel_height;
+
 
     //
     // update rectangles dependent on window size
@@ -265,6 +279,15 @@ update_and_draw_frame :: () -> bool {
     total_line_count := the_text_buffer.line_infos.count;
     text_pane_row_count := text_pane_rect.height / main_font.line_height;
 
+    // text ui info
+    {
+        using the_text_search_ui.rect;
+        left = absolute_left + 100;
+        top = absolute_bottom + 60;
+        width = 800;
+        height = xx (main_font.line_height + text_search_ui_border_width * 4);
+    }
+
     // XXX what's the english name for поле?
     {
         using left_column_rect;
@@ -283,22 +306,59 @@ update_and_draw_frame :: () -> bool {
     scroll_bar_slider_visible_height := max(scroll_bar_slider_effective_height, 20);
     lines_per_scroll_bar_pixel := text_pane_row_count / scroll_bar_slider_effective_height;
 
-    // text ui info
-    {
-        using the_text_search_ui.rect;
-        left = absolute_left + 100;
-        top = absolute_bottom + 60;
-        width = 800;
-        height = xx (main_font.line_height + text_search_ui_border_width * 4);
+    //
+    // drag scroll bar (do this here because to calculate the scroll bar slider rectangle)
+    //
+    if draggin_scroll_bar {
+        mouse_moved := mouse.y - mouse_at_click.y;
+        scroll_rows = scroll_rows_at_click - xx (mouse_moved * lines_per_scroll_bar_pixel);
+        scroll_rows = clamp(scroll_rows, 0, total_line_count - text_pane_row_count / 2.0);
+        target_scroll_rows = scroll_rows;
+
+        if !is_down(.MOUSE_BUTTON_LEFT) {
+            draggin_scroll_bar = false;
+            request_redraw("stopped draggin scroll bar");
+        }
+
+        if mouse != mouse_last_frame {
+            request_redraw(tprint("scroll at %", #line));
+        }
     }
 
-    old_main_font_pixel_height := main_font.pixel_height;
+    // scroll bar slider rectangle
+    {
+        rect := *scroll_bar_rect;
+
+        w := rect.width - scroll_bar_pad * 2;
+
+        h := scroll_bar_slider_visible_height;
+        //
+        // calculate the tweak that makes it so the oversized visual slider
+        // doesn't overflow at the bottom of the screen
+        //
+        h_diff := scroll_bar_slider_visible_height - scroll_bar_slider_effective_height;
+        t := scroll_rows / cast(float) total_line_count;
+        y_tweak := h_diff * t;
+
+        x := rect.left + scroll_bar_pad;
+
+        scroll_y := scroll_rows / lines_per_scroll_bar_pixel;
+        y := rect.top - scroll_y - h + y_tweak;
+
+        {
+            using scroll_bar_slider_rect;
+            left   = xx x;
+            top    = xx (y + h);
+            width  = xx w;
+            height = xx h;
+        }
+    }
 
     //
-    // update mouse focus (if possible, other ui elements are handled elsewhere)
+    // update mouse focus
     //
     mouse_focus = .NONE;
-    if draggin_scroll_bar {
+    if draggin_scroll_bar || axis_aligned_rectangle_contains(scroll_bar_slider_rect, mouse) {
         mouse_focus = .SCROLL_BAR_SLIDER;
     } else if (the_popup_menu.flags & .OPEN) && axis_aligned_rectangle_contains(rectangle_of(*the_popup_menu), mouse) {
         mouse_focus = .POPUP_MENU;
@@ -307,10 +367,45 @@ update_and_draw_frame :: () -> bool {
     } else if (the_text_search_ui.flags & .OPEN) && axis_aligned_rectangle_contains(the_text_search_ui.rect, mouse) {
         mouse_focus = .TEXT_SEARCH_UI;
     } else {
-        // then scroll bar anchor are checked after input events are handled,
-        // although maybe they should be checked here
-        //
-        // after that the rest of the rects
+        anchor_kind := hovered_scroll_bar_anchor_kind;
+        // I'm not actually sure this is needed...
+        mouse_in_rect := mouse - .{xx scroll_bar_rect.left, xx bottom(scroll_bar_rect)};
+        anchor_index := do_scroll_bar_anchors(scroll_bar_rect, explicit_anchors, anchor_button_active_color, .GET_HOVER, mouse_in_rect, t=15);
+        if anchor_index != -1 {
+            anchor_kind = .EXPLICIT;
+        } else {
+            anchor_index = do_scroll_bar_anchors(scroll_bar_rect, search_results.matches, search_match_color, .GET_HOVER, mouse_in_rect);
+            anchor_kind = .SEARCH_MATCH;
+        }
+
+        if anchor_index != -1 {
+            mouse_focus = .SCROLL_BAR_ANCHOR;
+        }
+
+        if anchor_index != hovered_scroll_bar_anchor_index || anchor_kind != hovered_scroll_bar_anchor_kind {
+            request_redraw("hovered scroll bar anchor changed");
+            hovered_scroll_bar_anchor_index = anchor_index;
+            hovered_scroll_bar_anchor_kind = anchor_kind;
+        }
+    }
+
+    if mouse_focus == .NONE {
+        if axis_aligned_rectangle_contains(scroll_bar_rect, mouse) {
+            mouse_focus = .SCROLL_BAR;
+        } else if axis_aligned_rectangle_contains(text_pane_rect, mouse) {
+            mouse_focus = .MAIN_TEXT_PANE;
+        } else if axis_aligned_rectangle_contains(left_column_rect, mouse) {
+            hover_line_index := screen_position_to_line_index(left_column_rect, mouse.y);
+            if hover_line_index >= 0 {
+                mouse_focus = .ANCHOR_BUTTONS;
+                if hovered_anchor_button_line != hover_line_index {
+                    request_redraw("hovered anchor button changed");
+                    hovered_anchor_button_line = hover_line_index;
+                }
+            } else {
+                mouse_focus = .LEFT_COLUMN;
+            }
+        }
     }
 
     //
@@ -415,6 +510,9 @@ update_and_draw_frame :: () -> bool {
         }
     }
 
+    //
+    // font size changed
+    //
     if main_font.pixel_height != old_main_font_pixel_height {
         old_scale := 1 / cast(float) main_font.line_height;
 
@@ -427,6 +525,59 @@ update_and_draw_frame :: () -> bool {
         request_redraw(tprint("scroll at %", #line));
     }
 
+    //
+    // update focused ui elements based on mouse click
+    //
+
+    if (mouse_focus != .POPUP_MENU) && (the_popup_menu.flags & .OPEN) && mouse_click_any {
+        the_popup_menu.flags &= ~.OPEN;
+        request_redraw("popup menu closed");
+    }
+
+    if (mouse_focus != .POPUP_TEXT_INPUT) && (the_popup_text_input.flags & .OPEN) && mouse_click_any {
+        close_popup_text_input(*the_popup_text_input);
+        request_redraw("popup text input closed");
+    }
+
+    if mouse_focus == .SCROLL_BAR_ANCHOR {
+        line_index: int;
+        if #complete hovered_scroll_bar_anchor_kind == {
+            case .EXPLICIT;     line_index = explicit_anchors[hovered_scroll_bar_anchor_index].line_index;
+            case .SEARCH_MATCH; line_index = search_results.matches[hovered_scroll_bar_anchor_index].line_index;
+        }
+        if is_click(.MOUSE_BUTTON_LEFT) {
+            target_scroll_rows = xx (line_index - text_pane_row_count / 2);
+        } else if is_click(.MOUSE_BUTTON_RIGHT) {
+            anchor_button_open_popup_menu(line_index, mouse);
+        }
+    }
+
+    if mouse_focus == .SCROLL_BAR && is_click(.MOUSE_BUTTON_LEFT) {
+        pixels_from_top := top(scroll_bar_rect) - mouse.y;
+        fraction_from_top := pixels_from_top / height(scroll_bar_rect);
+        line_index := total_line_count * fraction_from_top;
+        target_scroll_rows = xx (line_index - text_pane_row_count / 2);
+    }
+
+    if mouse_focus == .SCROLL_BAR_SLIDER && is_click(.MOUSE_BUTTON_LEFT) {
+        draggin_scroll_bar = true;
+        scroll_rows_at_click = scroll_rows;
+        request_redraw("start draggin scroll bar slider");
+    }
+
+    if mouse_focus != .ANCHOR_BUTTONS && hovered_anchor_button_line != -1 {
+        hovered_anchor_button_line = -1;
+        request_redraw("anchor button stopped hoverring");
+    }
+
+    if mouse_focus == .ANCHOR_BUTTONS {
+        if is_click(.MOUSE_BUTTON_LEFT) {
+            anchor_button_toggle(hovered_anchor_button_line);
+        } else if is_click(.MOUSE_BUTTON_RIGHT) {
+            anchor_button_open_popup_menu(hovered_anchor_button_line, mouse);
+        }
+    }
+
     // update vertical scroll
     scroll_rows = lerp(scroll_rows, target_scroll_rows, scroll_rows_lerp_factor);
     if abs(scroll_rows - target_scroll_rows) < 0.001 then scroll_rows = target_scroll_rows;
@@ -435,126 +586,8 @@ update_and_draw_frame :: () -> bool {
     scroll_columns = lerp(scroll_columns, target_scroll_columns, scroll_columns_lerp_factor);
     if abs(scroll_columns - target_scroll_columns) < 0.001 then scroll_columns = target_scroll_columns;
 
-    // reset these before doing popup menu, because popup menu sets these up
-    for *active_anchor_segment it.line_index = -1;
-
-    // update the popup menu (close only)
-    if mouse_focus != .POPUP_MENU && the_popup_menu.flags & .OPEN && mouse_click_any {
-        the_popup_menu.flags & ~.OPEN;
-        request_redraw("popup menu closed");
-    }
-
-    // update popup text input (close only)
-    if mouse_focus != .POPUP_TEXT_INPUT && the_popup_text_input.flags & .OPEN && mouse_click_any {
-        close_popup_text_input(*the_popup_text_input);
-        request_redraw("popup text input closed");
-    }
-
-    //
-    // drag scroll bar
-    //
-    if draggin_scroll_bar {
-        mouse_moved := mouse.y - mouse_at_click.y;
-        scroll_rows = scroll_rows_at_click - xx (mouse_moved * lines_per_scroll_bar_pixel);
-        scroll_rows = clamp(scroll_rows, 0, total_line_count - text_pane_row_count / 2.0);
-        target_scroll_rows = scroll_rows;
-
-        if !is_down(.MOUSE_BUTTON_LEFT) {
-            draggin_scroll_bar = false;
-            request_redraw("stopped draggin scroll bar");
-        }
-
-        if mouse != mouse_last_frame {
-            request_redraw(tprint("scroll at %", #line));
-        }
-    }
-
-    //
-    // update anchor buttons
-    //
-    {
-        if (mouse_focus == .NONE) && axis_aligned_rectangle_contains(left_column_rect, mouse) {
-            hover_line_index := screen_position_to_line_index(left_column_rect, mouse.y);
-            if hover_line_index >= 0 {
-                mouse_focus = .ANCHOR_BUTTONS;
-                if hover_line_index != hovered_anchor_button_line {
-                    hovered_anchor_button_line = hover_line_index;
-                    request_redraw(tprint("anchor buttons at %", #line));
-                }
-
-                if is_click(.MOUSE_BUTTON_LEFT) {
-                    anchor_button_toggle(hover_line_index);
-                } else if is_click(.MOUSE_BUTTON_RIGHT) {
-                    anchor_button_open_popup_menu(hover_line_index, mouse);
-                }
-            } else if hovered_anchor_button_line != -1 {
-                hovered_anchor_button_line = -1;
-                request_redraw(tprint("anchor buttons at %", #line));
-            }
-        }
-
-        if hovered_anchor_button_line != -1 && !axis_aligned_rectangle_contains(left_column_rect, mouse) {
-            hovered_anchor_button_line = -1;
-            request_redraw(tprint("anchor buttons at %", #line));
-        }
-    }
-
-    //
-    // update scroll bar anchors
-    //
-    if mouse_focus == .NONE {
-        anchor_kind := hovered_scroll_bar_anchor_kind;
-        // I'm not actually sure this is needed...
-        mouse_in_rect := mouse - .{xx scroll_bar_rect.left, xx bottom(scroll_bar_rect)};
-        anchor_index := do_scroll_bar_anchors(scroll_bar_rect, explicit_anchors, anchor_button_active_color, .GET_HOVER, mouse_in_rect, t=15);
-        if anchor_index != -1 {
-            anchor_kind = .EXPLICIT;
-            mouse_focus = .SCROLL_BAR_ANCHOR;
-        } else {
-            anchor_index = do_scroll_bar_anchors(scroll_bar_rect, search_results.matches, search_match_color, .GET_HOVER, mouse_in_rect);
-            anchor_kind = .SEARCH_MATCH;
-            mouse_focus = .SCROLL_BAR_ANCHOR;
-        }
-
-        if anchor_index != -1 {
-            line_index: int;
-            if #complete anchor_kind == {
-                case .EXPLICIT;     line_index = explicit_anchors[anchor_index].line_index;
-                case .SEARCH_MATCH; line_index = search_results.matches[anchor_index].line_index;
-            }
-            if is_click(.MOUSE_BUTTON_LEFT) {
-                target_scroll_rows = xx (line_index - text_pane_row_count / 2);
-                request_redraw(tprint("scroll bar anchors at %", #line));
-            } else if is_click(.MOUSE_BUTTON_RIGHT) {
-                anchor_button_open_popup_menu(line_index, mouse);
-            }
-        } else if axis_aligned_rectangle_contains(scroll_bar_rect, mouse) && is_click(.MOUSE_BUTTON_LEFT) {
-            pixels_from_top := top(scroll_bar_rect) - mouse.y;
-            fraction_from_top := pixels_from_top / height(scroll_bar_rect);
-            line_index := total_line_count * fraction_from_top;
-            target_scroll_rows = xx (line_index - text_pane_row_count / 2);
-            request_redraw(tprint("scroll bar anchors at %", #line));
-        }
-
-        if anchor_index != hovered_scroll_bar_anchor_index || anchor_kind != hovered_scroll_bar_anchor_kind {
-            builder: String_Builder;
-            builder.allocator = temp;
-            if anchor_index != hovered_scroll_bar_anchor_index
-                print(*builder, "% -> % ", hovered_scroll_bar_anchor_index, anchor_index);
-            if anchor_kind != hovered_scroll_bar_anchor_kind
-                print(*builder, "% -> % ", hovered_scroll_bar_anchor_kind, anchor_kind);
-            request_redraw(builder_to_string(*builder));
-            hovered_scroll_bar_anchor_index = anchor_index;
-            hovered_scroll_bar_anchor_kind = anchor_kind;
-        }
-    }
-
-    if mouse_focus == .NONE && axis_aligned_rectangle_contains(text_pane_rect, mouse) {
-        mouse_focus == .MAIN_TEXT_PANE;
-    }
-
     ////////////////////////////////////////////////////////////////////////////
-    // @TEMPORARY!!!
+    // @TEMPORARY!!!  (or is it?)
     if mouse_last_frame != mouse {
         request_redraw("mouse moved");
     }
@@ -580,9 +613,10 @@ update_and_draw_frame :: () -> bool {
     // draw text pane
     {
         profile_t0 = seconds_since_init();
-        handle_mouse: Mouse_Interaction;
 
-        draw_the_text_pane(*the_text_buffer, text_pane_rect, handle_click);
+        handle_mouse: Mouse_Interaction;
+        handle_mouse = ifx mouse_focus == .MAIN_TEXT_PANE then .CLICK | .HOVER;
+        draw_the_text_pane(*the_text_buffer, text_pane_rect, handle_mouse);
         Profile("draw_the_text_pane");
 
         // draw the side bars to fix the ugly text bleed over
@@ -664,46 +698,22 @@ update_and_draw_frame :: () -> bool {
         }
     }
 
-    // draw scroll bar & update scroll bar slider
+    // draw scroll bar
     {
-        rect := *scroll_bar_rect;
-        w := rect.width - scroll_bar_pad * 2;
-
-        h := scroll_bar_slider_visible_height;
-
-        //
-        // calculate the tweak that makes it so the oversized visual slider
-        // doesn't overflow at the bottom of the screen
-        //
-        assert(scroll_bar_slider_visible_height >= scroll_bar_slider_effective_height);
-        h_diff := scroll_bar_slider_visible_height - scroll_bar_slider_effective_height;
-        t := scroll_rows / cast(float) total_line_count;
-        y_tweak := h_diff * t;
-
-        x := rect.left + scroll_bar_pad;
-
-        scroll_y := scroll_rows / lines_per_scroll_bar_pixel;
-        y := rect.top - scroll_y - h + y_tweak;
-
-        // update scroll bar slider
-        color := scroll_bar_slider_color;
-        mouse_over_slider := axis_aligned_rectangle_contains(xx x, xx y, xx w, xx h, mouse);
-        if is_click(.MOUSE_BUTTON_LEFT) && mouse_over_slider {
-            draggin_scroll_bar = true;
-            scroll_rows_at_click = scroll_rows;
-            request_redraw(tprint("scroll bar at %", #line));
-        }
-
+        parent_rect := *scroll_bar_rect;
         // draw visible scroll bar slider
-        draw_axis_aligned_rectangle(xx x, y, xx w, h, color);
+        draw_axis_aligned_rectangle(scroll_bar_slider_rect, scroll_bar_slider_color);
+
+        x := scroll_bar_slider_rect.left;
+        w := scroll_bar_slider_rect.width;
 
         // draw log ranges of same source
         for i: 0..the_text_buffer.log_ranges_of_source.count-2 {
             range := the_text_buffer.log_ranges_of_source[i];
             if range.source_id == SOURCE_ID_UNKNOWN continue;
 
-            y_top := rect.top - range.start_index / cast(float) lines_per_scroll_bar_pixel;
-            y_bottom := rect.top - the_text_buffer.log_ranges_of_source[i + 1].start_index / cast(float) lines_per_scroll_bar_pixel;
+            y_top := parent_rect.top - range.start_index / cast(float) lines_per_scroll_bar_pixel;
+            y_bottom := parent_rect.top - the_text_buffer.log_ranges_of_source[i + 1].start_index / cast(float) lines_per_scroll_bar_pixel;
 
             color := get_log_source_color(range.source_id);
             draw_axis_aligned_rectangle(xx x, y_bottom, xx w, y_top - y_bottom, color);
@@ -717,8 +727,8 @@ update_and_draw_frame :: () -> bool {
                 // Makes complete sense
                 assert(above_line_index <= bellow_line_index);
 
-                y_top := rect.top - above_line_index / cast(float) lines_per_scroll_bar_pixel;
-                y_bottom := rect.top - bellow_line_index / cast(float) lines_per_scroll_bar_pixel;
+                y_top := parent_rect.top - above_line_index / cast(float) lines_per_scroll_bar_pixel;
+                y_bottom := parent_rect.top - bellow_line_index / cast(float) lines_per_scroll_bar_pixel;
 
                 my_w := w / 2.5;
                 my_x := x + (w - my_w) / 2;
@@ -736,7 +746,8 @@ update_and_draw_frame :: () -> bool {
                 search_match_index = do_scroll_bar_anchors(scroll_bar_rect, search_results.matches, search_match_color, .DRAW, mouse_in_rect);
             // explicit anchors have higher priority
             explicit_anchor_index := do_scroll_bar_anchors(scroll_bar_rect, explicit_anchors, anchor_button_active_color, .DRAW, mouse_in_rect, t=15);
-            if !mouse_over_slider {
+
+            if mouse_focus == .SCROLL_BAR_ANCHOR {
                 if explicit_anchor_index != -1 {
                     anchor := *explicit_anchors[explicit_anchor_index];
                     draw_single_scroll_bar_anchor(scroll_bar_rect, anchor.line_index, anchor.color, hover=true, t=15);
@@ -748,28 +759,36 @@ update_and_draw_frame :: () -> bool {
             }
         }
 
-        // draw visible scroll bar slider border
+        // the rest of the slider
         {
-            slider_oversize := 2.0;
-            border := 2.0;
-            if mouse_over_slider || draggin_scroll_bar {
-                slider_oversize = 3.0;
-                border = 4.0;
+            // draw visible scroll bar slider border
+            {
+                slider_oversize := 2.0;
+                border := 2.0;
+                if mouse_focus == .SCROLL_BAR_SLIDER {
+                    slider_oversize = 3.0;
+                    border = 4.0;
+                }
+                rect := *scroll_bar_slider_rect;
+                X := left(rect) - slider_oversize;
+                Y := bottom(rect) - slider_oversize;
+                W := width(rect) + slider_oversize;
+                H := height(rect) + 2 * slider_oversize;
+                draw_hollow_axis_aligned_rectangle(xx X, xx Y, xx W, xx H, border, scroll_bar_slider_color);
             }
-            X := x - slider_oversize;
-            Y := y - slider_oversize;
-            W := w + slider_oversize;
-            H := h + 2 * slider_oversize;
-            draw_hollow_axis_aligned_rectangle(xx X, xx Y, xx W, xx H, border, color);
-        }
 
-        // draw effective scroll bar slider
-        if scroll_bar_slider_visible_height != scroll_bar_slider_effective_height {
-            color := scroll_bar_effective_slider_color;
-            x_pad := 1;
-            h := scroll_bar_slider_effective_height;
-            y := rect.top - scroll_y - h;
-            draw_hollow_axis_aligned_rectangle(xx (x + x_pad - 1), y, xx (w - 2 * x_pad), xx h, 2, color);
+            // draw effective scroll bar slider
+            assert(scroll_bar_slider_visible_height >= scroll_bar_slider_effective_height);
+            if scroll_bar_slider_visible_height != scroll_bar_slider_effective_height {
+                color := scroll_bar_effective_slider_color;
+                x_pad := 1;
+                x := scroll_bar_slider_rect.left + x_pad - 1;
+                w := scroll_bar_slider_rect.width - 2 * x_pad;
+                h := scroll_bar_slider_effective_height;
+                scroll_y := scroll_rows / lines_per_scroll_bar_pixel;
+                y := scroll_bar_rect.top - scroll_y - h;
+                draw_hollow_axis_aligned_rectangle(xx x, y, xx w, xx h, 2, color);
+            }
         }
     }
 
@@ -781,12 +800,14 @@ update_and_draw_frame :: () -> bool {
 
     // draw the popup text input
     if the_popup_text_input.flags & .OPEN {
-        draw_popup_text_input(*the_popup_text_input, handle_click=false);
+        handle_click := (mouse_focus == .POPUP_TEXT_INPUT);
+        draw_popup_text_input(*the_popup_text_input, handle_click);
     }
 
     // draw the popup menu
     if the_popup_menu.flags & .OPEN {
-        handle_mouse := ifx (mouse_focus == .POPUP_MENU) then (.HOVER | .CLICK);
+        handle_mouse: Mouse_Interaction;
+        handle_mouse = ifx (mouse_focus == .POPUP_MENU) then (.HOVER | .CLICK);
         do_popup_menu(*the_popup_menu, mouse, handle_mouse, do_draw=true);
     }
 
@@ -801,7 +822,7 @@ update_and_draw_frame :: () -> bool {
         elapsed := seconds_since_init() - t0;
         print(*builder, "% %\n", frame_counter, fmt(elapsed, 6));
         print(*builder, "scroll: %, %\n", fmt(scroll_columns, 1), fmt(scroll_rows, 1));
-        print(*builder, "mouse focus: %\n", mouse_focus):
+        print(*builder, "mouse focus: %\n", mouse_focus);
         if the_text_search_ui.flags & .OPEN print(*builder, "search matches: %\n", search_results.matches.count);
         if hovered_scroll_bar_anchor_index != -1 then print(*builder, "% %\n", hovered_scroll_bar_anchor_kind, hovered_scroll_bar_anchor_index);
 
@@ -819,21 +840,10 @@ update_and_draw_frame :: () -> bool {
         draw_simple_text_pane(rect, font, .{x, y}, .TOP_LEFT, pane_text, hex_color("ffffff"), hex_color("181818"));
     }
 
-    // // @TEMPORARY
-    // {
-    //     p0 := Vector2.{left(window_rect) + width(window_rect) * .27, top(window_rect) - height(window_rect) * .2};
-    //     p1 := Vector2.{left(window_rect) + width(window_rect) * .27, bottom(window_rect) + height(window_rect) * .2};
-    //     p2 := Vector2.{right(window_rect) - width(window_rect) * .27, bottom(window_rect) + height(window_rect) * .5};
-    //     color := hex_color("808080");
-    //     if triangle_contains(p0, p1, p2, mouse) {
-    //         color = color_red;
-    //     }
-    //     draw_triangle(p0, p1, p2, color);
-    // }
-
-    Simp.set_scissor(0, 100, 0, 100);
-    Simp.clear_render_target(1, 0, 0, 1);
-    Simp.clear_scissor();
+    // Scissor doesn't work? Or I don't know how to use it???
+    // Simp.set_scissor(0, 100, 0, 100);
+    // Simp.clear_render_target(1, 0, 0, 1);
+    // Simp.clear_scissor();
 
     Simp.swap_buffers(window);
     Profile();
@@ -1018,7 +1028,7 @@ draw_the_text_pane :: (buffer: *Log_Text_Buffer, rect: Rectangle, handle_mouse: 
             last_line = max(last_line, line_index);
 
             if line_index == hover_line_index {
-                click_handled := do_structured_log_info(buffer, info, line_index, rect, mouse, .{x, y}, handle_mouse & .CLICK);
+                click_handled := do_structured_log_info(buffer, info, line_index, rect, mouse, .{x, y}, xx (handle_mouse & .CLICK));
                 if click_handled then event_out |= .CLICK;
             }
 
@@ -1164,7 +1174,7 @@ draw_the_text_pane :: (buffer: *Log_Text_Buffer, rect: Rectangle, handle_mouse: 
         }
     }
 
-    return click_handled;
+    return event_out;
 }
 
 do_structured_log_info :: (buffer: *Log_Text_Buffer, info: *Log_Line_Info, line_index: int, parent_rect: Rectangle, mouse: Vector2, origin: Vector2, handle_click: bool) -> click_handled: bool {
@@ -3073,6 +3083,8 @@ do_popup_menu :: (menu: *Popup_Menu, mouse: Vector2, handle_mouse: Mouse_Interac
     // draw background rect
     //
     #if do_draw {
+        b := popup_menu_border_width;
+
         draw_axis_aligned_rectangle(rect, popup_menu_item_bg_color);
         draw_hollow_axis_aligned_rectangle(rect.left - b, bottom(rect) - b, rect.width + 2 * b, rect.height + 2 * b, b, popup_menu_border_color);
     }
@@ -3143,7 +3155,7 @@ rectangle_of :: (menu: *Popup_Menu) -> Rectangle {
     rect.left = xx X;
     rect.width = xx W;
     rect.height = xx H;
-    rect.top = Y + H;
+    rect.top = xx (Y + H);
 
     return rect;
 }
