@@ -507,6 +507,7 @@ update_and_draw_frame :: () -> bool {
             target_scroll_rows = total_line_count - text_pane_row_count / 2.0;
         } else if it.key_pressed && it.ctrl_pressed && it.shift_pressed && it.key_code == #char "V" {
             Profile();
+            // TODO: remove existing anchors
             load_text_buffer_data(*the_text_buffer, from_clipboard=true);
             Profile();
         }
@@ -797,7 +798,7 @@ update_and_draw_frame :: () -> bool {
     // draw the text search ui
     if the_text_search_ui.flags & .OPEN {
         handle_mouse := (mouse_focus == .TEXT_SEARCH_UI);
-        do_text_search_ui(*the_text_search_ui, main_font, mouse, handle_mouse, do_draw=true);
+        do_text_search_ui(*the_text_search_ui, ui_mono_font, mouse, handle_mouse, do_draw=true);
     }
 
     // draw the popup text input
