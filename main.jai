@@ -240,9 +240,6 @@ update_and_draw_frame :: () -> bool {
     // reset temporary values
     //
 
-    // reset these before doing popup menu, because popup menu sets these up
-    for *active_anchor_segment it.line_index = -1;
-
     old_main_font_pixel_height := main_font.pixel_height;
 
 
@@ -809,10 +806,14 @@ update_and_draw_frame :: () -> bool {
         draw_popup_text_input(*the_popup_text_input, handle_click);
     }
 
+    // reset these before doing popup menu, because popup menu sets these up
+    for *active_anchor_segment it.line_index = -1;
+
     // draw the popup menu
     if the_popup_menu.flags & .OPEN {
         handle_mouse: Mouse_Interaction;
         handle_mouse = ifx (mouse_focus == .POPUP_MENU) then (.HOVER | .CLICK);
+
         do_popup_menu(*the_popup_menu, mouse, handle_mouse, do_draw=true);
     }
 
@@ -3068,8 +3069,11 @@ anchor_button_popup_menu_callback :: (menu: *Popup_Menu, event: Popup_Menu.Event
         active_anchor_segment[0] = first;
         active_anchor_segment[1] = last;
 
-        if event == .CLICK
+        if event == .CLICK {
             remove_line_range(*the_text_buffer, first.line_index, last.line_index);
+            active_anchor_segment[0].line_index = -1;
+            active_anchor_segment[1].line_index = -1;
+        }
     }
 }
 
