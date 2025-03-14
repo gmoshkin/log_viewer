@@ -15,7 +15,7 @@ build :: () {
     //
 
     options.output_path = #filepath;
-    options.output_executable_name = "log_viewer";
+    options.output_executable_name = EXE_NAME;
 
     if #complete config.build_mode == {
     case .DEBUG;
