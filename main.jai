@@ -582,10 +582,8 @@ update_and_draw_frame :: () -> bool {
     }
 
     // update vertical scroll
-    new_scroll_rows := lerp(scroll_rows, target_scroll_rows, scroll_rows_lerp_factor);
-    // work around floating point precision error
-    if scroll_rows == new_scroll_rows then scroll_rows = target_scroll_rows;
-    if abs(new_scroll_rows - target_scroll_rows) < 0.001 then scroll_rows = target_scroll_rows;
+    scroll_rows = lerp(scroll_rows, target_scroll_rows, scroll_rows_lerp_factor);
+    if abs(scroll_rows - target_scroll_rows) < 0.001 then scroll_rows = target_scroll_rows;
 
     // update horizontal scroll
     scroll_columns = lerp(scroll_columns, target_scroll_columns, scroll_columns_lerp_factor);
