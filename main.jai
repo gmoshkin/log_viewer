@@ -103,7 +103,7 @@ main :: () {
     start_parsing_thread(*the_text_buffer);
 
     Profile();
-    request_load_text_buffer_data(*the_text_buffer, input_file_full_path, input_from_clipboard);
+    request_load_text_buffer_data(*the_text_buffer, input_file_full_paths, input_from_clipboard, skip_until_timestamp);
     Profile();
 
     reload_main_font();
@@ -448,8 +448,7 @@ update_and_draw_frame :: () -> bool {
         }
 
         else if it.type == .DRAG_AND_DROP_FILES {
-            file := it.files[0];
-            request_load_text_buffer_data(*the_text_buffer, file);
+            request_load_text_buffer_data(*the_text_buffer, it.files);
         }
 
         // modules/Input doesn't set it.ctrl_pressed for MOUSE_WHEEL :(
@@ -530,7 +529,7 @@ update_and_draw_frame :: () -> bool {
         } else if it.key_pressed && it.ctrl_pressed && it.shift_pressed && it.key_code == #char "V" {
             Profile();
             // TODO: remove existing anchors
-            request_load_text_buffer_data(*the_text_buffer, "", from_clipboard=true);
+            request_load_text_buffer_data(*the_text_buffer, from_clipboard=true);
             Profile();
         }
     }
@@ -675,11 +674,17 @@ update_and_draw_frame :: () -> bool {
         x_tweak := 0;
         y_tweak := 0;
 
-        if the_text_buffer.request.filename {
-            text := copy_string(the_text_buffer.request.filename,, temp);
+        filenames := the_text_buffer.request.filenames;
+        if filenames {
+            text: string;
+            if filenames.count > 1 {
+                text = tprint("%*%", common_prefix(filenames), common_postfix(filenames));
+            } else {
+                text = copy_string(filenames[0],, temp);
+            }
             w_text := Simp.prepare_text(font.regular, text);
-            x := rect.left + (rect.width - w_text) * .9;
-            y -= xx (font.line_height * .5);
+            x := rect.left + (rect.width - w_text) * .5;
+            y -= xx (font.line_height + 4.0);
             Simp.draw_prepared_text(font.regular, xx (x - x_tweak), xx (y + y_tweak), ui_element_text_color);
         }
         y -= xx font.line_height;
@@ -710,6 +715,7 @@ update_and_draw_frame :: () -> bool {
         }
     }
 
+    Profile("draw_line_anchors");
     //
     // draw line anchors
     //
@@ -779,6 +785,7 @@ update_and_draw_frame :: () -> bool {
         }
     }
 
+    Profile("draw scroll bar");
     // draw scroll bar
     if !the_text_buffer.parsing_in_progress
     {
@@ -874,6 +881,8 @@ update_and_draw_frame :: () -> bool {
         }
     }
 
+    Profile();
+
     // draw the text search ui
     if the_text_search_ui.flags & .OPEN {
         handle_mouse := (mouse_focus == .TEXT_SEARCH_UI);
@@ -911,13 +920,17 @@ update_and_draw_frame :: () -> bool {
         print(*builder, "mouse focus: %\n", mouse_focus);
         if the_text_search_ui.flags & .OPEN print(*builder, "search matches: %\n", search_results.matches.count);
         if hovered_scroll_bar_anchor_index != -1 then print(*builder, "% %\n", hovered_scroll_bar_anchor_kind, hovered_scroll_bar_anchor_index);
+        if quicksort_duration then print(*builder, "quicksort_duration: %\n", quicksort_duration);
 
 
         if the_text_search_ui.completions.values {
             print(*builder, "matched prefix: %\n", the_text_search_ui.completions.matched_prefix_length);
         }
-        for the_text_search_ui.completions.values {
+        for array_view(the_text_search_ui.completions.values, 0, 16) {
             print(*builder, "%\n", it);
+        }
+        if the_text_search_ui.completions.values.count > 16 {
+            print(*builder, "...");
         }
 
         for redraw_reasons print(*builder, "%\n", it);
@@ -1075,9 +1088,13 @@ draw_the_text_pane :: (buffer: *Log_Text_Buffer, rect: Rectangle, handle_mouse: 
         draw_axis_aligned_rectangle(xx x, xx y_bottom, xx w, xx H, background_color);
     }
 
+    pointer := mouse;
+    if (the_popup_menu.flags & .OPEN) {
+        pointer = the_popup_menu.at;
+    }
     hover_line_index := -1;
     if (handle_mouse & .HOVER) {
-        hover_line_index = screen_position_to_line_index(rect, mouse.y);
+        hover_line_index = screen_position_to_line_index(rect, pointer.y);
     }
 
     first_line := S64_MAX;
@@ -1115,7 +1132,7 @@ draw_the_text_pane :: (buffer: *Log_Text_Buffer, rect: Rectangle, handle_mouse: 
             last_line = max(last_line, line_index);
 
             if line_index == hover_line_index {
-                click_handled := do_structured_log_info(buffer, info, line_index, rect, mouse, .{x, y}, xx (handle_mouse & .CLICK));
+                click_handled := do_structured_log_info(buffer, info, line_index, rect, pointer, .{x, y}, xx (handle_mouse & .CLICK));
                 if click_handled then event_out |= .CLICK;
             }
 
@@ -1267,6 +1284,7 @@ draw_the_text_pane :: (buffer: *Log_Text_Buffer, rect: Rectangle, handle_mouse: 
 do_structured_log_info :: (buffer: *Log_Text_Buffer, info: *Log_Line_Info, line_index: int, parent_rect: Rectangle, mouse: Vector2, origin: Vector2, handle_click: bool) -> click_handled: bool {
     for type_info(Log_Info_Piece_Type).values {
         type := cast(Log_Info_Piece_Type) it;
+        if type == .NONE continue;
         if !info_contains(info, type) continue;
 
         _, start, count_u8 := inline lookup_log_info(buffer, info, type);
@@ -1290,6 +1308,11 @@ do_structured_log_info :: (buffer: *Log_Text_Buffer, info: *Log_Line_Info, line_
                 return true;
             }
         }
+    }
+
+    if handle_click && is_click(.MOUSE_BUTTON_RIGHT) {
+        line_open_popup_menu(info, mouse, line_index);
+        return true;
     }
 
     return false;
@@ -1500,6 +1523,8 @@ Log_Text_Buffer :: struct {
 }
 the_text_buffer: Log_Text_Buffer;
 
+quicksort_duration: float64;
+
 reset_text_buffer :: (using buffer: *Log_Text_Buffer) {
     array_reset_keeping_memory(*line_infos);
     max_line_length = 0;
@@ -1544,7 +1569,7 @@ get_line :: (using buffer: *Log_Text_Buffer, line_index: int) -> string {
 // buffer mutations
 //
 
-load_text_buffer_data :: (buffer: *Log_Text_Buffer, filename := "", from_clipboard := false) {
+load_text_buffer_data :: (buffer: *Log_Text_Buffer, _filenames: [] string = .[], from_clipboard := false, skip_until: Calendar_Time = .{}) {
     mark := get_temporary_storage_mark();
     defer set_temporary_storage_mark(mark);
 
@@ -1558,24 +1583,116 @@ load_text_buffer_data :: (buffer: *Log_Text_Buffer, filename := "", from_clipboa
     } else {
         buffer.parsing_state = "reading from file";
 
-        file_path := filename;
-        if !filename {
-            file_path = tprint("%/sample_log.txt", assets_directory);
+        filenames := _filenames;
+        if !filenames {
+            sample_file := tprint("%/sample_log.txt", assets_directory);
+            filenames = .[sample_file];
         }
-        log("reading file '%'", file_path);
-        new_data=, ok := read_entire_file(file_path);
-        assert(ok);
+
+        if filenames.count == 1 {
+            filename := filenames[0];
+            log("reading file '%'", filename);
+            new_data=, ok := read_entire_file(filename);
+            assert(ok);
+        } else {
+            buffer.parsing_state = "reading from files";
+
+            files: [..] string;
+            files.allocator = temp;
+            array_reserve(*files, filenames.count);
+
+            sources: [..] string;
+            sources.allocator = temp;
+            array_reserve(*sources, filenames.count);
+            source_max_len := 0;
+
+            pre := common_prefix(filenames);
+            post := common_postfix(filenames);
+
+            for filenames {
+                log("reading file '%'", it);
+                data, ok := read_entire_file(it);
+                assert(ok);
+                array_add(*files, data);
+
+                source := it;
+                source = advance(source, pre.count);
+                source = slice(source, 0, source.count - post.count);
+                source_max_len = max(source_max_len, source.count);
+                array_add(*sources, source);
+            }
+
+            buffer.parsing_state = "preprocessing files";
+            Line_To_Sort :: struct { timestamp: Calendar_Time; timestamp_streak: s64; line: string; source: string; };
+            compare_line_to_sort :: (l: Line_To_Sort, r: Line_To_Sort) -> int {
+                t := inline compare_calendar_time(l.timestamp, r.timestamp);
+                if t != 0 return t;
+                return l.timestamp_streak - r.timestamp_streak;
+            }
+            lines_to_sort: [..] Line_To_Sort;
+            defer array_reset(*lines_to_sort);
+            total_size := 0;
+
+            info: Log_Line_Info;
+            info.timestamp = to_calendar(seconds_to_apollo(0));
+
+            streak: s64 = 0;
+            prev_timestamp: Calendar_Time;
+
+            for file: files {
+                tail := file;
+                source := sources[it_index];
+                while tail {
+                    found:, line:, tail = split_from_left(tail, #char "\n");
+                    parse_log_line(null, line, *info, mode=.ONLY_TIMESTAMP);
+
+                    if info.timestamp < skip_until continue;
+
+                    if info.timestamp == prev_timestamp { streak += 1; } else { streak = 0; }
+                    prev_timestamp = info.timestamp;
+
+                    array_add(*lines_to_sort, .{info.timestamp, streak, line, source});
+                    total_size += line.count;
+                    // for one "\n" after each line
+                    total_size += 1;
+                    // +3 for ' | ' after the source
+                    total_size += source_max_len + 3;
+                }
+            }
+
+            buffer.parsing_state = "sorting logs";
+            t0 := seconds_since_init();
+            quick_sort(lines_to_sort, compare_line_to_sort);
+            quicksort_duration = seconds_since_init() - t0;
+            log("quicksort_duration: %", quicksort_duration);
+
+            new_data = alloc_string(total_size);
+
+            buffer.parsing_state = "copying data";
+            p := new_data.data;
+            for lines_to_sort {
+                write_to_pointer(*p, it.source);
+
+                padding := source_max_len - it.source.count;
+                for 1..padding write_to_pointer(*p, " ");
+
+                write_to_pointer(*p, " | ");
+                write_to_pointer(*p, it.line);
+                write_to_pointer(*p, "\n");
+            }
+            assert(p == new_data.data + total_size);
+        }
     }
 
     free(buffer.all_text);
     buffer.all_text = new_data;
 
     Profile();
-    process_text_buffer_data(buffer);
+    process_text_buffer_data(buffer, skip_until);
     Profile("process_text_buffer_data");
 }
 
-process_text_buffer_data :: (using buffer: *Log_Text_Buffer) {
+process_text_buffer_data :: (using buffer: *Log_Text_Buffer, skip_until: Calendar_Time = .{}) {
     // TODO: keeping history, undo/redo, etc.
 
     buffer.parsing_state = "preprocessing";
@@ -1592,7 +1709,27 @@ process_text_buffer_data :: (using buffer: *Log_Text_Buffer) {
 
     buffer.parsing_state = "parsing logs";
 
+    // skip until requested timestamp
     tail := all_text;
+    while tail {
+        found:, line:, tail = split_from_left(tail, #char "\n");
+
+        temp_info: Log_Line_Info;
+        parse_log_line(null, line, *temp_info, mode=.ONLY_TIMESTAMP);
+        if temp_info.timestamp >= skip_until {
+            start := line.data - all_text.data;
+            tail = advance(all_text, start);
+            break;
+        }
+    }
+
+    if tail.count != all_text.count {
+        copy := copy_string(tail);
+        free(all_text);
+        all_text = copy;
+        tail = all_text;
+    }
+
     line_index := 0;
     while tail {
         // if we get a new request, we should just bale on the current one
@@ -1731,11 +1868,34 @@ Parsing_Request :: struct {
     version: u64;
     type: enum { LOAD_FILE; LOAD_CLIPBOARD; REMOVE_LINE_RANGE; };
 
-    filename: string;       // for .LOAD_FILE
+    filenames: [..] string;       // for .LOAD_FILE
     remove_line_first: s64; // for .REMOVE_LINE_RANGE
     remove_line_last: s64;  // for .REMOVE_LINE_RANGE
+    skip_until: Calendar_Time; // for .LOAD_FILE
 
     mutex: Mutex;
+}
+
+copy_request :: (request: *Parsing_Request) -> Parsing_Request {
+    using copy: Parsing_Request;
+    version = request.version;
+    type = request.type;
+    remove_line_first = request.remove_line_first;
+    remove_line_last = request.remove_line_last;
+    skip_until = request.skip_until;
+
+    array_reserve(*filenames, request.filenames.count);
+    for request.filenames array_add(*filenames, copy_string(it));
+
+    return copy;
+}
+
+set_filenames :: (request: *Parsing_Request, filenames: [] string) {
+    for request.filenames free(it);
+    request.filenames.count = 0;
+    for filenames {
+        if it array_add(*request.filenames, copy_string(it));
+    }
 }
 
 parsing_thread_proc :: (thread: *Thread) -> s64 {
@@ -1744,8 +1904,7 @@ parsing_thread_proc :: (thread: *Thread) -> s64 {
 
     while true {
         lock(*buffer.request.mutex);
-        request := buffer.request;
-        request.filename = copy_string(request.filename,, temp);
+        request := copy_request(*buffer.request,, temp);
         unlock(*buffer.request.mutex);
 
         if !buffer.parsing_in_progress && buffer.current_version == request.version {
@@ -1763,7 +1922,7 @@ parsing_thread_proc :: (thread: *Thread) -> s64 {
         if #complete request.type == {
         case .LOAD_FILE; #through;
         case .LOAD_CLIPBOARD;
-            load_text_buffer_data(buffer, request.filename, request.type == .LOAD_CLIPBOARD);
+            load_text_buffer_data(buffer, request.filenames, request.type == .LOAD_CLIPBOARD, request.skip_until);
         case .REMOVE_LINE_RANGE;
             remove_line_range(buffer, request.remove_line_first, request.remove_line_last);
         }
@@ -1774,15 +1933,15 @@ parsing_thread_proc :: (thread: *Thread) -> s64 {
     return 0;
 }
 
-request_load_text_buffer_data :: (buffer: *Log_Text_Buffer, filename := "", from_clipboard := false) {
+request_load_text_buffer_data :: (buffer: *Log_Text_Buffer, filenames: [] string = .[], from_clipboard := false, skip_until: Calendar_Time = .{}) {
     goto_definition_helper :: load_text_buffer_data;
     lock(*buffer.request.mutex);
     defer unlock(*buffer.request.mutex);
 
     buffer.request.version += 1;
     buffer.request.type = ifx from_clipboard then .LOAD_CLIPBOARD else .LOAD_FILE;
-    free(buffer.request.filename);
-    buffer.request.filename = copy_string(filename);
+    set_filenames(*buffer.request, filenames);
+    buffer.request.skip_until = skip_until;
 
     wake(*parsing_cond);
 }
@@ -1796,8 +1955,6 @@ request_remove_line_range :: (using buffer: *Log_Text_Buffer, first_line: s64, l
     buffer.request.type = .REMOVE_LINE_RANGE;
     buffer.request.remove_line_first = first_line;
     buffer.request.remove_line_last = last_line;
-    free(buffer.request.filename);
-    buffer.request.filename = "";
 
     wake(*parsing_cond);
 }
@@ -1824,6 +1981,8 @@ Log_Line_Info :: struct {
 
     location_offset: s16 = -1;
 
+    timestamp_start: u8;
+    timestamp_count: u8;
     source_start: u8;
     source_count: u8;
     pid_start: u8;
@@ -1846,6 +2005,8 @@ THREAD_NAME_UNKNOWN :: 0xff;
 MODULE_NAME_UNKNOWN :: 0xff;
 
 Log_Info_Piece_Type :: enum {
+    NONE;
+    TIMESTAMP;
     SOURCE;
     PID;
     THREAD_NAME;
@@ -1858,6 +2019,8 @@ Log_Info_Piece_Type :: enum {
 }
 
 log_info_type_to_name :: (struct { type: Log_Info_Piece_Type; name: string; }).[
+    .{.NONE,            "whole_line"},
+    .{.TIMESTAMP,       "timestamp"},
     .{.SOURCE,          "source"},
     .{.PID,             "pid"},
     .{.THREAD_NAME,     "thread_name"},
@@ -1872,6 +2035,8 @@ log_info_type_to_name :: (struct { type: Log_Info_Piece_Type; name: string; }).[
 
 get_all_entities_of_type :: (buffer: *Log_Text_Buffer, type: Log_Info_Piece_Type) -> [] string {
     if #complete type == {
+        case .NONE;             return .[];
+        case .TIMESTAMP;        return .[];
         case .SOURCE;           return buffer.all_log_sources;
         case .PID;
             result: [..] string;
@@ -1917,6 +2082,12 @@ lookup_log_info :: inline (buffer: *Log_Text_Buffer, line_index: int, type: Log_
 
 lookup_log_info :: (buffer: *Log_Text_Buffer, info: *Log_Line_Info, type: Log_Info_Piece_Type) -> string, start: s16, count: u8 {
     if #complete type == {
+        case .NONE;
+            return "", 0, xx,no_check U8_MAX;
+        case .TIMESTAMP;
+            start := info.timestamp_start;
+            count := info.timestamp_count;
+            return "", start, count;
         case .SOURCE;
             start := info.source_start;
             count := info.source_count;
@@ -1961,6 +2132,8 @@ lookup_log_info :: (buffer: *Log_Text_Buffer, info: *Log_Line_Info, type: Log_In
 
 info_contains :: (info: *Log_Line_Info, piece: Log_Info_Piece_Type) -> bool {
     if #complete piece == {
+        case .NONE;              return true;
+        case .TIMESTAMP;         return info.timestamp_count != 0;
         case .SOURCE;            return info.source_id != SOURCE_ID_UNKNOWN;
         case .PID;               return info.pid != -1;
         case .THREAD_NAME;       return info.thread_name_offset != THREAD_NAME_UNKNOWN;
@@ -1973,10 +2146,11 @@ info_contains :: (info: *Log_Line_Info, piece: Log_Info_Piece_Type) -> bool {
     }
 }
 
-parse_log_line :: (buffer: *Log_Text_Buffer, line: string, info: *Log_Line_Info) -> bool {
+Parse_Log_Line_Mode :: enum { FULL; ONLY_TIMESTAMP; }
+parse_log_line :: (buffer: *Log_Text_Buffer, line: string, info: *Log_Line_Info, $mode := Parse_Log_Line_Mode.FULL) -> bool {
     cursor := 0;
 
-    remember_words(line, *buffer.all_words);
+    #if mode == .FULL remember_words(line, *buffer.all_words);
 
     // skip whitespace
     while (cursor < line.count) && (inline is_space(line[cursor])) cursor += 1;
@@ -1993,7 +2167,7 @@ parse_log_line :: (buffer: *Log_Text_Buffer, line: string, info: *Log_Line_Info)
     source_start := cursor;
     while cursor < line.count {
         c := line[cursor];
-        if !(is_alpha(c) || is_digit(c) || c == #char ":" || c == #char "_") break;
+        if !(is_alpha(c) || is_digit(c) || c == #char ":" || c == #char "_" || c == #char "-") break;
         cursor += 1;
     }
     source: string;
@@ -2011,6 +2185,7 @@ parse_log_line :: (buffer: *Log_Text_Buffer, line: string, info: *Log_Line_Info)
     } else {
         // it's not a source actually, reset back to start
         cursor = first_non_whitespace;
+        source = "";
     }
 
     // skip whitespace
@@ -2042,6 +2217,9 @@ parse_log_line :: (buffer: *Log_Text_Buffer, line: string, info: *Log_Line_Info)
     cursor = ifx tail then tail.data - line.data else line.count;
 
     info.timestamp = timestamp;
+    info.timestamp_start = xx timestamp_start;
+    info.timestamp_count = xx (cursor - timestamp_start);
+    #if mode == .ONLY_TIMESTAMP return true;
 
     //
     // parse pid
@@ -2315,7 +2493,8 @@ log_info_open_popup_menu :: (info: *Log_Line_Info, mouse: Vector2, line_index: i
     menu := open_the_popup_menu(mouse, log_line_popup_menu_callback, data);
 
     using Log_Line_Popup_Menu_Item;
-    popup_menu_push_item(menu, "Copy text to clipboard", id=xx COPY_TEXT);
+    popup_menu_push_item(menu, "Copy highlighted text to clipboard", id=xx COPY_TEXT);
+    popup_menu_push_item(menu, "Copy line to clipboard", id=xx COPY_WHOLE_LINE);
     popup_menu_push_item(menu, "Add to search query", id=xx ADD_TO_SEARCH);
 
     if type == .SOURCE for log_source, source_id: the_text_buffer.all_log_sources {
@@ -2329,6 +2508,14 @@ log_info_open_popup_menu :: (info: *Log_Line_Info, mouse: Vector2, line_index: i
         item_id := xx MERGE_SOURCE + source_id;
         popup_menu_push_item(menu, "Merge with % (pid: %)", log_source, pids, id=item_id, icon=.{color, 8.0, .SQUARE});
     }
+}
+
+line_open_popup_menu :: (info: *Log_Line_Info, mouse: Vector2, line_index: int) {
+    data := Log_Line_Popup_Menu_Callback_Data.{line_index, .NONE};
+    menu := open_the_popup_menu(mouse, log_line_popup_menu_callback, data);
+
+    using Log_Line_Popup_Menu_Item;
+    popup_menu_push_item(menu, "Copy line to clipboard", id=xx COPY_WHOLE_LINE);
 }
 
 add_source :: (sources: *[..] string, source: string) -> source_id: u8 {
@@ -2403,6 +2590,7 @@ Log_Line_Popup_Menu_Callback_Data :: struct {
 
 Log_Line_Popup_Menu_Item :: enum {
     COPY_TEXT;
+    COPY_WHOLE_LINE;
     ADD_TO_SEARCH;
     MERGE_SOURCE :: 0x100;
 }
@@ -2422,6 +2610,10 @@ log_line_popup_menu_callback :: (menu: *Popup_Menu, event: Popup_Menu.Event) {
         case .COPY_TEXT;
             value := lookup_log_info(buffer, line_index, type);
             assert(xx value);
+            os_clipboard_set_text(value);
+
+        case .COPY_WHOLE_LINE;
+            value := get_line(buffer, line_index);
             os_clipboard_set_text(value);
 
         case .ADD_TO_SEARCH;
@@ -2492,8 +2684,12 @@ search_match_color :: #run hex_color("f5a511");
 
 search_results: Search_Results;
 
-update_search_results :: (using buffer: *Log_Text_Buffer, search_string: string) -> completions: Completions {
-    assert(search_string.count < search_results.search_string_storage.count, "%", search_string.count);
+update_search_results :: (using buffer: *Log_Text_Buffer, _search_string: string) -> completions: Completions {
+    search_string := _search_string;
+    if search_string.count >= search_results.search_string_storage.count {
+        search_string.count = search_results.search_string_storage.count;
+        log_error("truncated search string to '%'", search_string);
+    }
     memcpy(search_results.search_string_storage.data, search_string.data, search_string.count);
     search_results.search_string_storage[search_string.count] = 0; // XXX I don't really need this...
     search_results.search_string.data = search_results.search_string_storage.data;
@@ -3057,7 +3253,11 @@ save_completions :: (ui: *Text_Search_UI, new_completions: Completions) {
 jump_to_next_search_match :: (forwards: bool) {
     n_lines_per_screen := height(text_pane_rect) / cast(float) main_font.line_height;
     jump_destination_row_offset := n_lines_per_screen / 2.0 - 3;
-    current_line_index := cast(int) floor(target_scroll_rows + jump_destination_row_offset);
+    effective_position := target_scroll_rows + jump_destination_row_offset;
+    current_line_index := cast(int) floor(effective_position);
+    if effective_position - xx current_line_index > 0 && forwards {
+        current_line_index += 1;
+    }
 
     // @ROBUSTNESS assuming search_matches are ordered
     matched_line_index := -1;
@@ -3309,6 +3509,7 @@ anchor_button_popup_menu_callback :: (menu: *Popup_Menu, event: Popup_Menu.Event
 Popup_Menu :: struct {
     top: float;
     left: float;
+    at: Vector2;
     items: [..] Popup_Menu_Item;
     hovered_item: s16 = -1;
     flags: enum_flags { OPEN; };
@@ -3370,6 +3571,7 @@ open_the_popup_menu :: (at: Vector2, callback: Popup_Menu.Callback, callback_dat
         cast(*T, menu.callback_data.value_pointer).* = callback_data;
     }
 
+    menu.at = at;
     menu.left = at.x;
     menu.top = at.y;
     menu.flags |= .OPEN;
@@ -4340,9 +4542,10 @@ is_down :: ($char: string) -> bool #expand {
 // command line arguments
 //
 
-input_file_full_path: string;
+input_file_full_paths: [..] string;
 input_from_clipboard: bool;
 run_tests_mode: bool;
+skip_until_timestamp: Calendar_Time;
 
 parse_command_line_arguments :: () {
     args := get_command_line_arguments();
@@ -4364,6 +4567,21 @@ parse_command_line_arguments :: () {
                 run_tests_mode = true;
                 cursor += 1;
                 continue;
+            case "-since";
+                cursor += 1;
+                if cursor >= args.count {
+                    log_error("expected a timestamp after '-since'");
+                    exit(1);
+                }
+                to_parse := args[cursor];
+                cursor += 1;
+                timestamp, result := parse_date_timestamp(to_parse);
+                if !result {
+                    log_error("expected a timestamp after '-since', got '%'", to_parse);
+                    exit(1);
+                }
+                skip_until_timestamp = timestamp;
+                continue;
         }
 
         if arg[0] == #char "-" {
@@ -4374,14 +4592,14 @@ parse_command_line_arguments :: () {
         break;
     }
 
-    if cursor < args.count {
+    while cursor < args.count {
         file := args[cursor];
         if is_absolute_path(file) {
-            input_file_full_path = file;
+            array_add(*input_file_full_paths, file);
         } else if OS == .WINDOWS && file && file[0] == #char "/" {
-            input_file_full_path = convert_wsl_path_to_windows(file);
+            array_add(*input_file_full_paths, convert_wsl_path_to_windows(file));
         } else {
-            input_file_full_path = sprint("%/%", working_directory, file);
+            array_add(*input_file_full_paths, sprint("%/%", working_directory, file));
         }
         cursor += 1;
     }
@@ -5079,6 +5297,73 @@ test_parse_date_timestamp :: () {
     }
 }
 
+common_prefix :: (values: [] string) -> string {
+    if !values return "";
+
+    best_so_far := values[0];
+    for current: advance(values, 1) {
+        if current.count < best_so_far.count {
+            best_so_far.count = current.count;
+        }
+
+        for best_so_far {
+            if it == current[it_index] continue;
+            best_so_far.count = it_index;
+            break;
+        }
+
+        if !best_so_far break;
+    }
+
+    return best_so_far;
+}
+
+common_postfix :: (values: [] string) -> string {
+    if !values return "";
+
+    best_so_far := values[0];
+    for current: advance(values, 1) {
+        overflow := best_so_far.count - current.count;
+        if overflow > 0 {
+            advance(*best_so_far, overflow);
+        }
+
+        i := 0;
+        while i < best_so_far.count {
+            if best_so_far[best_so_far.count - 1 - i] != current[current.count - 1 - i] {
+                advance(*best_so_far, best_so_far.count - i);
+                break;
+            }
+            i += 1;
+        }
+
+        if !best_so_far break;
+    }
+
+    return best_so_far;
+}
+
+
+test_common_prefix_or_postfix :: () {
+    values := string.[
+        "foo/bar/baz.txt",
+        "foo/bar/ballz.txt",
+        "foo/biz.txt",
+    ];
+
+    pretty_assert(common_prefix(.[]) == "");
+    pretty_assert(common_prefix(.["1"]) == "1");
+    pretty_assert(common_prefix(.["ass"]) == "ass");
+    pretty_assert(common_prefix(.["foooooooooo", "bor"]) == "");
+    pretty_assert(common_prefix(values) == "foo/b");
+
+    pretty_assert(common_postfix(.[]) == "");
+    pretty_assert(common_postfix(.["1"]) == "1");
+    pretty_assert(common_postfix(.["ass"]) == "ass");
+    pretty_assert(common_postfix(.["foooooooooo", "bor"]) == "");
+    pretty_assert(common_postfix(values) == "z.txt");
+}
+
 hex_color :: ($hex: string, $loc := #caller_location) -> Vector4 #expand {
     return #run -> Vector4 {
         result, ok := parse_hex_color(hex);
@@ -5179,7 +5464,7 @@ array_insert_at :: (array: *[..] $T, items: [] T, index: int) {
     memcpy(array.data + index, items.data, items.count * size_of(T));
 }
 
-// Stole this from modules/Sort. Minor changes.
+// Stole this from modules/Sort. Made `f` polymorphic and inlined, this gives almost a 2x speed boost
 // @Speed: This version of quick_sort (and probably the other one)
 // seems to compare items to themselves a lot, which is clearly pointless.
 // Fix that!
@@ -5193,8 +5478,41 @@ quick_sort :: inline (array: [] $T, $f: (T, T) -> $R) -> [] T {  // R is an inte
         j := n-1;
 
         while true {
-            while f(a[i], p) < 0  {i += 1;}
-            while f(p, a[j]) < 0  {j -= 1;}
+            while (inline f(a[i], p)) < 0  {i += 1;}
+            while (inline f(p, a[j])) < 0  {j -= 1;}
+
+            if i >= j break;
+
+            t := a[i];
+            a[i] = a[j];
+            a[j] = t;
+
+            i += 1;
+            j -= 1;
+        }
+
+        quicksort_helper(a, i);
+        quicksort_helper(a + i, n - i);
+    }
+
+    quicksort_helper(array.data, array.count);
+    return array;
+}
+
+// Stole this from modules/Sort. Minor changes. UPDATE what did I change and why???
+quick_sort :: inline (array: [] $T, $f: (T) -> $R) -> [] T {  // R is an integer type, but may be e.g. 32-bit.
+    quicksort_helper :: (a: *T, n: s64) {
+        if n < 2 return;
+
+        p := a[n / 2];
+
+        i := 0;
+        j := n-1;
+
+        while true {
+            fp := f(p);
+            while f(a[i]) < fp  {i += 1;}
+            while fp < f(a[j])  {j -= 1;}
 
             if i >= j break;
 
@@ -5271,6 +5589,41 @@ array_equals :: (a: [] $T, b: [] T) -> bool {
     if a.count != b.count return false;
     for a if it != b[it_index] return false;
     return true;
+}
+
+write_to_pointer :: inline (p: **u8, s: string) {
+    memcpy(p.*, s.data, s.count);
+    p.* += s.count;
+}
+
+compare_calendar_time :: (a: Calendar_Time, b: Calendar_Time) -> int {
+    { t := a.year - b.year;                                             if t return t; }
+    { t := a.month_starting_at_0 - b.month_starting_at_0;               if t return t; }
+    { t := a.day_of_month_starting_at_0 - b.day_of_month_starting_at_0; if t return t; }
+    { t := a.hour - b.hour;                                             if t return t; }
+    { t := a.minute - b.minute;                                         if t return t; }
+    { t := a.second - b.second;                                         if t return t; }
+    return a.millisecond - b.millisecond;
+}
+
+operator < :: (a: Calendar_Time, b: Calendar_Time) -> bool {
+    return (inline compare_calendar_time(a, b)) < 0;
+}
+
+operator <= :: (a: Calendar_Time, b: Calendar_Time) -> bool {
+    return (inline compare_calendar_time(a, b)) <= 0;
+}
+
+operator > :: (a: Calendar_Time, b: Calendar_Time) -> bool {
+    return (inline compare_calendar_time(a, b)) > 0;
+}
+
+operator >= :: (a: Calendar_Time, b: Calendar_Time) -> bool {
+    return (inline compare_calendar_time(a, b)) >= 0;
+}
+
+operator == :: (a: Calendar_Time, b: Calendar_Time) -> bool {
+    return (inline compare_calendar_time(a, b)) == 0;
 }
 
 advance :: inline (array: [] $T, bytes: s64) -> result: [] T {
@@ -5553,6 +5906,7 @@ run_tests :: () {
     log("test_parse_date_timestamp");      test_parse_date_timestamp();
     log("test_parse_search_string");       test_parse_search_string();
     log("test_parse_string_literal");      test_parse_string_literal();
+    log("test_common_prefix_or_postfix");  test_common_prefix_or_postfix();
     elapsed := seconds_since_init() - t0;
     log("\e[32mtests passed!\e[0m elapsed %", fmt(elapsed, 3));
 }
@@ -5575,3 +5929,4 @@ Hash :: #import "Hash";
 Default_Allocator :: #import "Default_Allocator";
 #import "Compiler";
 #import "Thread";
+Sort :: #import "Sort";
