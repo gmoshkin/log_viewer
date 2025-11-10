@@ -161,10 +161,10 @@ ui_font := My_Dynamic_Font.{
 text_pane_rect: Rectangle;
 left_column_rect: Rectangle;
 
-scroll_rows := 0.0;
-target_scroll_rows := 0.0;
+scroll_rows: float64 = 0.0;
+target_scroll_rows: float64 = 0.0;
 scroll_rows_lerp_factor := 0.5;
-scroll_rows_at_click := 0.0;
+scroll_rows_at_click: float64 = 0.0;
 
 scroll_columns := 0.0;
 target_scroll_columns := 0.0;
@@ -788,7 +788,7 @@ update_and_draw_frame :: () -> bool {
                 x := scroll_bar_slider_rect.left + x_pad - 1;
                 w := scroll_bar_slider_rect.width - 2 * x_pad;
                 h := scroll_bar_slider_effective_height;
-                scroll_y := scroll_rows / lines_per_scroll_bar_pixel;
+                scroll_y := cast(float, scroll_rows) / lines_per_scroll_bar_pixel;
                 y := scroll_bar_rect.top - scroll_y - h;
                 draw_hollow_axis_aligned_rectangle(xx x, y, xx w, xx h, 2, color);
             }
@@ -983,10 +983,10 @@ draw_the_text_pane :: (buffer: *Log_Text_Buffer, rect: Rectangle, handle_mouse: 
 
         x := left(rect);
         y_top := cast(float) top(rect);
-        if scroll_rows < 0 then y_top += scroll_rows * h;
+        if scroll_rows < 0 then y_top += xx scroll_rows * h;
 
         y_bottom := cast(float) bottom(rect);
-        text_height := (buffer.line_infos.count - scroll_rows) * h;
+        text_height := cast(float, buffer.line_infos.count - scroll_rows) * h;
         if text_height < xx height(rect) then y_bottom = top(rect) - text_height;
 
 
@@ -1013,7 +1013,7 @@ draw_the_text_pane :: (buffer: *Log_Text_Buffer, rect: Rectangle, handle_mouse: 
         pane_width_in_characters := (rect.width - text_x_tweak) / main_font.mono_width;
 
         x := rect.left + text_x_tweak;
-        y_top := rect.top + (scroll_rows - 1) * h;
+        y_top : float = rect.top + (cast(float, scroll_rows) - 1) * h;
         text_y_tweak := -(main_font.typical_descender + main_font.max_descender) / 2.0;
 
         current_ansi_style := Style.{ fg_color = text_color };
@@ -1116,7 +1116,7 @@ draw_the_text_pane :: (buffer: *Log_Text_Buffer, rect: Rectangle, handle_mouse: 
     // time stamp graph
     {
         h := main_font.line_height;
-        y_top := rect.top + (scroll_rows - 0.5) * h;
+        y_top := rect.top + (cast(float, scroll_rows) - 0.5) * h;
 
         time_range_min := APOLLO_TIME_INVALID;
         time_range_max := APOLLO_TIME_INVALID;
@@ -1279,7 +1279,7 @@ draw_text_line_with_ansi_escape_codes :: (font_set: My_Dynamic_Font, text: strin
         if override_style.fg_color.w > 0 then fg_color = override_style.fg_color;
         bg_color := it.style.bg_color;
         if override_style.bg_color.w > 0 then bg_color = override_style.bg_color;
-        if it.style.attributes & .INVERSE then inline Swap(*fg_color, *bg_color);
+        if it.style.attributes & .INVERSE then inline swap(*fg_color, *bg_color);
 
         // draw background
         if bg_color.w > 0 {
@@ -3329,7 +3329,7 @@ do_simple_button :: (x: float, y: float, w: float, h: float, border: float, icon
     if axis_aligned_rectangle_contains(x, y, w, h, mouse) {
         event_out |= .HOVER;
 
-        Swap(*fg_color_, *bg_color_);
+        swap(*fg_color_, *bg_color_);
 
         if handle_mouse && is_click(.MOUSE_BUTTON_LEFT) {
             event_out |= .CLICK;
@@ -3780,7 +3780,7 @@ text_input_delete_selection :: (state: *Text_Input_State) {
     if state.cursor == state.selection_start return;
     start := state.cursor;
     end := state.selection_start;
-    if start > end then Swap(*start, *end);
+    if start > end then swap(*start, *end);
     array_ordered_remove_range(*state.buffer, start, end);
     state.cursor = start;
 }
