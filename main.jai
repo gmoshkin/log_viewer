@@ -1501,7 +1501,7 @@ process_text_buffer_data :: (using buffer: *Log_Text_Buffer) {
 
         max_line_length = max(max_line_length, line.count);
 
-        ok := inline parse_log_line(*the_text_buffer, line, info);
+        ok := parse_log_line(*the_text_buffer, line, info);
 
         if log_ranges_of_source.count == 0 || last(log_ranges_of_source).source_id != info.source_id {
             array_add(*log_ranges_of_source, .{ info.source_id, line_index });
@@ -1541,8 +1541,10 @@ process_text_buffer_data :: (using buffer: *Log_Text_Buffer) {
     log("max line length: %", max_line_length);
     log("escape code count: % (% unique)", escape_code_infos.count, escape_code_stats.count);
     log("unique word count: %", all_words.count);
-    for all_words {
-        log("    %: %", it_index, it);
+    if all_words.count < 100 {
+        for all_words {
+            log("    %: %", it_index, it);
+        }
     }
 
     // for escape_code_stats {
@@ -1769,6 +1771,8 @@ parse_log_line :: (buffer: *Log_Text_Buffer, line: string, info: *Log_Line_Info)
     while (cursor < line.count) && (inline is_space(line[cursor])) cursor += 1;
     if cursor >= line.count return false;
 
+    first_non_whitespace := cursor;
+
     //
     // parse source
     //
@@ -1781,17 +1785,22 @@ parse_log_line :: (buffer: *Log_Text_Buffer, line: string, info: *Log_Line_Info)
         if !(is_alpha(c) || is_digit(c) || c == #char ":" || c == #char "_") break;
         cursor += 1;
     }
-    if cursor == source_start return false;
-
-    source_count := cursor - source_start;
-    source := slice(line, source_start, source_count);
+    source: string;
+    if cursor != source_start {
+        source_count := cursor - source_start;
+        source = slice(line, source_start, source_count);
+    }
 
     // skip whitespace
     while (cursor < line.count) && (inline is_space(line[cursor])) cursor += 1;
 
     if cursor >= line.count return false;
-    if line[cursor] != #char "|" return false;
-    cursor += 1;
+    if line[cursor] == #char "|" {
+        cursor += 1;
+    } else {
+        // it's not a source actually, reset back to start
+        cursor = first_non_whitespace;
+    }
 
     // skip whitespace
     while (cursor < line.count) && (inline is_space(line[cursor])) cursor += 1;
@@ -1818,11 +1827,6 @@ parse_log_line :: (buffer: *Log_Text_Buffer, line: string, info: *Log_Line_Info)
 
         return false;
     }
-
-    source_id := add_source(*buffer.all_log_sources, source);
-    info.source_start = xx source_start;
-    info.source_count = xx source.count;
-    info.source_id = source_id;
 
     cursor = ifx tail then tail.data - line.data else line.count;
 
@@ -1857,6 +1861,15 @@ parse_log_line :: (buffer: *Log_Text_Buffer, line: string, info: *Log_Line_Info)
     if line.count - cursor < 1 return false;
     rb := line[cursor]; cursor += 1;
     if rb != #char "]" return false;
+
+    if !source {
+        source_start = pid_start;
+        source = slice(line, pid_start, pid_count);
+    }
+    source_id := add_source(*buffer.all_log_sources, source);
+    info.source_start = xx source_start;
+    info.source_count = xx source.count;
+    info.source_id = source_id;
 
     info.pid = pid;
     info.pid_start = xx pid_start;
