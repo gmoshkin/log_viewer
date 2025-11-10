@@ -591,14 +591,14 @@ update_and_draw_frame :: () -> bool {
 
     ////////////////////////////////////////////////////////////////////////////
     // @TEMPORARY!!!  (or is it?)
-    if mouse_last_frame != mouse {
+    if mouse_last_frame != mouse && axis_aligned_rectangle_contains(window_rect, mouse) {
         request_redraw("mouse moved");
     }
     if target_scroll_rows != scroll_rows || target_scroll_columns != scroll_columns {
         request_redraw(tprint("scroll animation %, %", target_scroll_columns - scroll_columns, target_scroll_rows - scroll_rows));
     }
 
-    if !Input.input_application_has_focus return should_quit;
+    // if !Input.input_application_has_focus return should_quit;
     if !redraw_needed return should_quit;
     // One last redraw to update the redraw reason
     redraw_needed = (redraw_reasons.count != 0);
