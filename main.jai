@@ -72,6 +72,21 @@ main :: () {
                            background_color_rgb = .[.1, .1, .1],
                            wanted_msaa = WANTED_MSAA);
 
+    // setup drag and drop (copy-pasted from GetRect example.jai)
+    #if OS == .WINDOWS {
+        // @Feature: Add user-specific typelist support.
+        Windows.DragAcceptFiles(window, cast(Windows.BOOL) true);
+    } else #if OS == .LINUX {
+        X11 :: #import "X11";
+        typelist := string.["url/url", "text/uri-list", "text/plain", "application/octet-stream"];
+        X11.enable_drag_and_drop(window, typelist);
+    } else #if OS == .MACOS {
+        #import "Objective_C";
+        #import "Objective_C/AppKit";
+        types := NSArray(NSPasteboardType).arrayWithObject(NSPasteboardTypeFileURL);
+        NSView.registerForDraggedTypes(window, types);
+    }
+
     exe_path := System.get_path_of_running_executable();
     exe_dir := path_strip_filename(exe_path);
     assets_directory = sprint("%/assets", exe_dir);
@@ -85,8 +100,10 @@ main :: () {
 
     remember_allocators(*the_text_search_ui.text_input.buffer);
 
+    start_parsing_thread(*the_text_buffer);
+
     Profile();
-    load_text_buffer_data(*the_text_buffer, input_from_clipboard);
+    request_load_text_buffer_data(*the_text_buffer, input_file_full_path, input_from_clipboard);
     Profile();
 
     reload_main_font();
@@ -430,6 +447,11 @@ update_and_draw_frame :: () -> bool {
             should_quit = true;
         }
 
+        else if it.type == .DRAG_AND_DROP_FILES {
+            file := it.files[0];
+            request_load_text_buffer_data(*the_text_buffer, file);
+        }
+
         // modules/Input doesn't set it.ctrl_pressed for MOUSE_WHEEL :(
         else if it.type == .MOUSE_WHEEL && modifiers == .CTRL && !draggin_scroll_bar {
             ofs := it.wheel_delta / it.typical_wheel_delta;
@@ -508,7 +530,7 @@ update_and_draw_frame :: () -> bool {
         } else if it.key_pressed && it.ctrl_pressed && it.shift_pressed && it.key_code == #char "V" {
             Profile();
             // TODO: remove existing anchors
-            load_text_buffer_data(*the_text_buffer, from_clipboard=true);
+            request_load_text_buffer_data(*the_text_buffer, "", from_clipboard=true);
             Profile();
         }
     }
@@ -597,6 +619,9 @@ update_and_draw_frame :: () -> bool {
     if target_scroll_rows != scroll_rows || target_scroll_columns != scroll_columns {
         request_redraw(tprint("scroll animation %, %", target_scroll_columns - scroll_columns, target_scroll_rows - scroll_rows));
     }
+    if the_text_buffer.parsing_in_progress || the_text_buffer.current_version != the_text_buffer.request.version {
+        request_redraw(tprint("%", the_text_buffer.request.type));
+    }
 
     // if !Input.input_application_has_focus return should_quit;
     if !redraw_needed return should_quit;
@@ -614,6 +639,7 @@ update_and_draw_frame :: () -> bool {
     Simp.set_shader_for_color();
 
     // draw text pane
+    if !the_text_buffer.parsing_in_progress
     {
         profile_t0 = seconds_since_init();
 
@@ -633,9 +659,61 @@ update_and_draw_frame :: () -> bool {
         draw_axis_aligned_rectangle(right_rect, window_bg_color);
     }
 
+    // draw progress bar
+    if the_text_buffer.parsing_in_progress
+    {
+        font := ui_font;
+
+        rect: Rectangle;
+        rect.width = xx (window_rect.width * .6);
+        rect.left = xx (window_rect.left + (window_rect.width - rect.width) * .5);
+        rect.height = xx (font.line_height * 4.0);
+        rect.top = xx (window_rect.top - (window_rect.height - rect.height) * .5);
+        draw_axis_aligned_rectangle(rect, ui_element_middleground_color);
+
+        y := rect.top;
+        x_tweak := 0;
+        y_tweak := 0;
+
+        if the_text_buffer.request.filename {
+            text := copy_string(the_text_buffer.request.filename,, temp);
+            w_text := Simp.prepare_text(font.regular, text);
+            x := rect.left + (rect.width - w_text) * .9;
+            y -= xx (font.line_height * .5);
+            Simp.draw_prepared_text(font.regular, xx (x - x_tweak), xx (y + y_tweak), ui_element_text_color);
+        }
+        y -= xx font.line_height;
+
+        {
+            w_text := Simp.prepare_text(font.regular, the_text_buffer.parsing_state);
+            x := rect.left + (rect.width - w_text) * .5;
+            Simp.draw_prepared_text(font.regular, xx (x - x_tweak), xx (y + y_tweak), ui_element_text_color);
+        }
+
+        {
+            slider_margin := 10.0;
+            progress_slider: Rectangle;
+            progress_slider.height = xx (font.line_height * .8);
+            progress_slider.top = xx (bottom(rect) + slider_margin + progress_slider.height);
+
+            progress_max_width := rect.width - slider_margin * 2;
+            progress_slider.width = xx progress_max_width;
+            progress_slider.left = xx (rect.left + slider_margin);
+            draw_axis_aligned_rectangle(progress_slider, ui_element_background_color);
+
+            if the_text_buffer.all_text
+            {
+                t := the_text_buffer.parsing_cursor / cast(float64, the_text_buffer.all_text.count);
+                progress_slider.width = xx (progress_max_width * t);
+                draw_axis_aligned_rectangle(progress_slider, main_text_pane_dim_text_color);
+            }
+        }
+    }
+
     //
     // draw line anchors
     //
+    if !the_text_buffer.parsing_in_progress
     {
         rect := *left_column_rect;
         x_tweak := -3;
@@ -702,6 +780,7 @@ update_and_draw_frame :: () -> bool {
     }
 
     // draw scroll bar
+    if !the_text_buffer.parsing_in_progress
     {
         parent_rect := *scroll_bar_rect;
         // draw visible scroll bar slider
@@ -961,10 +1040,11 @@ main_text_pane_dim_text_color       :: #run hex_color("909090");
 main_text_pane_background_color     :: #run hex_color("202020");
 main_text_pane_dim_background_color :: #run hex_color("404040");
 
-ui_element_background_color :: #run hex_color("181818");
-ui_element_border_color     :: #run hex_color("303030");
-ui_element_cursor_color     :: #run hex_color("ffffff");
-ui_element_text_color       :: #run hex_color("ffffff");
+ui_element_background_color     :: #run hex_color("181818");
+ui_element_middleground_color   :: #run hex_color("262626");
+ui_element_border_color         :: #run hex_color("303030");
+ui_element_cursor_color         :: #run hex_color("ffffff");
+ui_element_text_color           :: #run hex_color("ffffff");
 
 // @DEBUG
 global_time_range_min := APOLLO_TIME_INVALID;
@@ -1409,6 +1489,14 @@ Log_Text_Buffer :: struct {
     all_words: Table(string, int);
     // string owned by `all_text`
     message_words: Table(string, int);
+
+    // async
+    current_version: u64;
+    request: Parsing_Request;
+
+    parsing_in_progress: bool;
+    parsing_state: string;
+    parsing_cursor: s64;
 }
 the_text_buffer: Log_Text_Buffer;
 
@@ -1452,17 +1540,26 @@ get_line :: (using buffer: *Log_Text_Buffer, line_index: int) -> string {
     return line;
 }
 
-load_text_buffer_data :: (buffer: *Log_Text_Buffer, from_clipboard := false) {
+//
+// buffer mutations
+//
+
+load_text_buffer_data :: (buffer: *Log_Text_Buffer, filename := "", from_clipboard := false) {
     mark := get_temporary_storage_mark();
     defer set_temporary_storage_mark(mark);
 
     new_data: string;
     if from_clipboard {
+        // FIXME: should probably wrap this and other places with a mutex lock...
+        buffer.parsing_state = "reading from clipboard";
+
         log("reading text data from clipboard");
         new_data = os_clipboard_get_text();
     } else {
-        file_path := input_file_full_path;
-        if !input_file_full_path {
+        buffer.parsing_state = "reading from file";
+
+        file_path := filename;
+        if !filename {
             file_path = tprint("%/sample_log.txt", assets_directory);
         }
         log("reading file '%'", file_path);
@@ -1481,6 +1578,8 @@ load_text_buffer_data :: (buffer: *Log_Text_Buffer, from_clipboard := false) {
 process_text_buffer_data :: (using buffer: *Log_Text_Buffer) {
     // TODO: keeping history, undo/redo, etc.
 
+    buffer.parsing_state = "preprocessing";
+
     if contains(all_text, #char "\r") {
         // FIXME could also replace this in place...
         new_data := replace(all_text, "\r\n", "\n");
@@ -1491,23 +1590,30 @@ process_text_buffer_data :: (using buffer: *Log_Text_Buffer) {
 
     reset_text_buffer(buffer);
 
+    buffer.parsing_state = "parsing logs";
+
     tail := all_text;
     line_index := 0;
     while tail {
+        // if we get a new request, we should just bale on the current one
+        if (line_index % 100) == 0 && (buffer.current_version != buffer.request.version) { return; }
+
         defer line_index += 1;
         found:, line:, tail = split_from_left(tail, #char "\n");
         info := array_add(*line_infos);
-        info.line_offset = line.data - the_text_buffer.all_text.data;
+        info.line_offset = line.data - buffer.all_text.data;
+
+        buffer.parsing_cursor = info.line_offset;
 
         max_line_length = max(max_line_length, line.count);
 
-        ok := parse_log_line(*the_text_buffer, line, info);
+        ok := parse_log_line(buffer, line, info);
 
         if log_ranges_of_source.count == 0 || last(log_ranges_of_source).source_id != info.source_id {
             array_add(*log_ranges_of_source, .{ info.source_id, line_index });
         }
 
-        // line_offset := line.data - the_text_buffer.all_text.data;
+        // line_offset := line.data - buffer.all_text.data;
         info.escape_codes_start = xx escape_code_infos.count;
         parse_ansi_escape_codes(line, 0, *escape_code_infos);
         info.escape_codes_count = xx (escape_code_infos.count - info.escape_codes_start);
@@ -1516,10 +1622,16 @@ process_text_buffer_data :: (using buffer: *Log_Text_Buffer) {
 
     }
 
+    buffer.parsing_cursor = buffer.all_text.count;
+    buffer.parsing_state = "post processing";
+
     // Add a dummy range start at the end for convenience
     array_add(*log_ranges_of_source, .{ SOURCE_ID_UNKNOWN, line_index });
 
-    for to, to_id: the_text_buffer.all_log_sources for from, from_id: the_text_buffer.all_log_sources {
+    for to, to_id: buffer.all_log_sources for from, from_id: buffer.all_log_sources {
+        // if we get a new request, we should just bale on the current one
+        if (line_index % 100) == 0 && (buffer.current_version != buffer.request.version) { return; }
+
         if to_id == from_id continue;
         to_pids := table_find_multiple(*sources_to_pid, to);
         from_pids := table_find_multiple(*sources_to_pid, from);
@@ -1552,11 +1664,17 @@ process_text_buffer_data :: (using buffer: *Log_Text_Buffer) {
     // }
 
     if search_results.matches {
+        buffer.parsing_state = "updating search matches";
         update_search_results(buffer, search_results.search_string);
     }
+
+    buffer.parsing_in_progress = false;
+    buffer.parsing_state = "done";
 }
 
 remove_line_range :: (using buffer: *Log_Text_Buffer, first_line: s64, last_line: s64) {
+    buffer.parsing_state = "removing lines";
+
     assert(0 <= first_line, "%", first_line);
     assert(first_line <= last_line, "% v %", first_line, last_line);
     assert(last_line <= line_infos.count, "% v %", last_line, line_infos.count);
@@ -1589,6 +1707,99 @@ remove_line_range :: (using buffer: *Log_Text_Buffer, first_line: s64, last_line
     Profile();
     process_text_buffer_data(buffer);
     Profile("process_text_buffer_data");
+}
+
+//
+// parsing thread
+//
+
+parsing_thread: Thread;
+parsing_cond: Condition_Variable;
+parsing_mutex_for_cond: Mutex;
+
+start_parsing_thread :: (buffer: *Log_Text_Buffer) {
+    init(*parsing_mutex_for_cond, "mutex_for_waker");
+    init(*parsing_cond, "waker");
+    init(*the_text_buffer.request.mutex, "request");
+
+    parsing_thread.data = *the_text_buffer;
+    thread_init(*parsing_thread, parsing_thread_proc);
+    thread_start(*parsing_thread);
+}
+
+Parsing_Request :: struct {
+    version: u64;
+    type: enum { LOAD_FILE; LOAD_CLIPBOARD; REMOVE_LINE_RANGE; };
+
+    filename: string;       // for .LOAD_FILE
+    remove_line_first: s64; // for .REMOVE_LINE_RANGE
+    remove_line_last: s64;  // for .REMOVE_LINE_RANGE
+
+    mutex: Mutex;
+}
+
+parsing_thread_proc :: (thread: *Thread) -> s64 {
+    context.thread_name = "parsing";
+    buffer := cast(*Log_Text_Buffer, thread.data);
+
+    while true {
+        lock(*buffer.request.mutex);
+        request := buffer.request;
+        request.filename = copy_string(request.filename,, temp);
+        unlock(*buffer.request.mutex);
+
+        if !buffer.parsing_in_progress && buffer.current_version == request.version {
+            // wait until woken up
+            wait(*parsing_cond, *parsing_mutex_for_cond);
+            continue;
+        }
+
+        log("parsing request: %", request);
+
+        buffer.parsing_in_progress = true;
+        buffer.parsing_cursor = 0;
+        buffer.current_version = request.version;
+
+        if #complete request.type == {
+        case .LOAD_FILE; #through;
+        case .LOAD_CLIPBOARD;
+            load_text_buffer_data(buffer, request.filename, request.type == .LOAD_CLIPBOARD);
+        case .REMOVE_LINE_RANGE;
+            remove_line_range(buffer, request.remove_line_first, request.remove_line_last);
+        }
+
+        reset_temporary_storage();
+    }
+
+    return 0;
+}
+
+request_load_text_buffer_data :: (buffer: *Log_Text_Buffer, filename := "", from_clipboard := false) {
+    goto_definition_helper :: load_text_buffer_data;
+    lock(*buffer.request.mutex);
+    defer unlock(*buffer.request.mutex);
+
+    buffer.request.version += 1;
+    buffer.request.type = ifx from_clipboard then .LOAD_CLIPBOARD else .LOAD_FILE;
+    free(buffer.request.filename);
+    buffer.request.filename = copy_string(filename);
+
+    wake(*parsing_cond);
+}
+
+request_remove_line_range :: (using buffer: *Log_Text_Buffer, first_line: s64, last_line: s64) {
+    goto_definition_helper :: remove_line_range;
+    lock(*buffer.request.mutex);
+    defer unlock(*buffer.request.mutex);
+
+    buffer.request.version += 1;
+    buffer.request.type = .REMOVE_LINE_RANGE;
+    buffer.request.remove_line_first = first_line;
+    buffer.request.remove_line_last = last_line;
+    free(buffer.request.filename);
+    buffer.request.filename = "";
+
+    wake(*parsing_cond);
 }
 
 //
@@ -3084,7 +3295,7 @@ anchor_button_popup_menu_callback :: (menu: *Popup_Menu, event: Popup_Menu.Event
         active_anchor_segment[1] = last;
 
         if event == .CLICK {
-            remove_line_range(*the_text_buffer, first.line_index, last.line_index);
+            request_remove_line_range(*the_text_buffer, first.line_index, last.line_index);
             active_anchor_segment[0].line_index = -1;
             active_anchor_segment[1].line_index = -1;
         }
@@ -4507,6 +4718,8 @@ parse_escape_sequence :: (s: string) -> Small_Escape_Sequence, bool {
 // logging
 //
 
+#add_context thread_name: string;
+
 my_logger :: (message: string, data: *void, info: Log_Info) {
     builder: String_Builder;
     builder.allocator = temp;
@@ -4517,6 +4730,11 @@ my_logger :: (message: string, data: *void, info: Log_Info) {
     print_time_for_log(*builder, to_calendar(current_time_consensus(), .LOCAL));
     print(*builder, ": ");
     if #compile_time print(*builder, "#compile_time ");
+
+    if context.thread_name && context.thread_name != "main" {
+        append(*builder, context.thread_name);
+        append(*builder, " ");
+    }
 
     filename := path_filename(info.location.fully_pathed_filename);
     print(*builder, "[%:%] %\n", filename, info.location.line_number, message);
@@ -5356,3 +5574,4 @@ System :: #import "System";
 Hash :: #import "Hash";
 Default_Allocator :: #import "Default_Allocator";
 #import "Compiler";
+#import "Thread";
