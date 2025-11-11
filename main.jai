@@ -1552,6 +1552,8 @@ Log_Text_Buffer :: struct {
     // string owned by `all_text`
     message_words: Table(string, int);
 
+    skipped_based_on_timestamp: int;
+
     // async
     current_version: u64;
     request: Parsing_Request;
@@ -1628,99 +1630,8 @@ load_text_buffer_data :: (buffer: *Log_Text_Buffer, _filenames: [] string = .[],
             filenames = .[sample_file];
         }
 
-        if filenames.count == 1 {
-            filename := filenames[0];
-            log("reading file '%'", filename);
-            new_data=, ok := read_entire_file(filename);
-            assert(ok);
-        } else {
-            buffer.parsing_state = "reading from files";
-
-            files: [..] string;
-            files.allocator = temp;
-            array_reserve(*files, filenames.count);
-
-            sources: [..] string;
-            sources.allocator = temp;
-            array_reserve(*sources, filenames.count);
-            source_max_len := 0;
-
-            pre := common_prefix(filenames);
-            post := common_postfix(filenames);
-
-            for filenames {
-                log("reading file '%'", it);
-                data, ok := read_entire_file(it);
-                assert(ok);
-                array_add(*files, data);
-
-                source := it;
-                source = advance(source, pre.count);
-                source = slice(source, 0, source.count - post.count);
-                source_max_len = max(source_max_len, source.count);
-                array_add(*sources, source);
-            }
-
-            buffer.parsing_state = "preprocessing files";
-            Line_To_Sort :: struct { timestamp: Calendar_Time; timestamp_streak: s64; line: string; source: string; };
-            compare_line_to_sort :: (l: Line_To_Sort, r: Line_To_Sort) -> int {
-                t := inline compare_calendar_time(l.timestamp, r.timestamp);
-                if t != 0 return t;
-                return l.timestamp_streak - r.timestamp_streak;
-            }
-            lines_to_sort: [..] Line_To_Sort;
-            defer array_reset(*lines_to_sort);
-            total_size := 0;
-
-            info: Log_Line_Info;
-            info.timestamp = to_calendar(seconds_to_apollo(0));
-
-            streak: s64 = 0;
-            prev_timestamp: Calendar_Time;
-
-            for file: files {
-                tail := file;
-                source := sources[it_index];
-                while tail {
-                    found:, line:, tail = split_from_left(tail, #char "\n");
-                    parse_log_line(null, line, *info, mode=.ONLY_TIMESTAMP);
-
-                    if info.timestamp < skip_until continue;
-
-                    if info.timestamp == prev_timestamp { streak += 1; } else { streak = 0; }
-                    prev_timestamp = info.timestamp;
-
-                    array_add(*lines_to_sort, .{info.timestamp, streak, line, source});
-                    total_size += line.count;
-                    // for one "\n" after each line
-                    total_size += 1;
-                    // +3 for ' | ' after the source
-                    total_size += source_max_len + 3;
-                }
-            }
-
-            buffer.parsing_state = "sorting logs";
-            t0 := seconds_since_init();
-            quick_sort(lines_to_sort, compare_line_to_sort);
-            quicksort_duration = seconds_since_init() - t0;
-            log("quicksort_duration: %", quicksort_duration);
-
-            new_data = alloc_string(total_size);
-
-            buffer.parsing_state = "copying data";
-            p := new_data.data;
-            for lines_to_sort {
-                write_to_pointer(*p, it.source);
-
-                padding := source_max_len - it.source.count;
-                for 1..padding write_to_pointer(*p, " ");
-
-                write_to_pointer(*p, " | ");
-                write_to_pointer(*p, it.line);
-                write_to_pointer(*p, "\n");
-            }
-            assert(p == new_data.data + total_size);
-        }
+        buffer.skipped_based_on_timestamp = 0;
+        new_data = load_data_from_files(buffer, filenames, skip_until);
     }
 
     free(buffer.all_text);
@@ -1729,6 +1640,131 @@ load_text_buffer_data :: (buffer: *Log_Text_Buffer, _filenames: [] string = .[],
     Profile();
     process_text_buffer_data(buffer, skip_until);
     Profile("process_text_buffer_data");
+}
+
+load_data_from_files :: (buffer: *Log_Text_Buffer, filepaths: [] string, skip_until: Calendar_Time) -> data: string {
+    filenames: [..] string;
+    filenames.allocator = temp;
+
+    add_file_based_on_extension :: (filenames: *[..] string, filepath: string) {
+        ext, found := path_extension(filepath);
+        if !found || ext == "log" || ext == "txt" {
+            array_add(filenames, filepath);
+        } else {
+            log_error("ignoring file path '%'", filepath);
+        }
+    }
+
+    visitor :: (info: *File_Visit_Info, filenames: *[..] string) {
+        add_file_based_on_extension(filenames, info.full_name);
+    }
+
+    for filepaths {
+        ok := visit_files(it, recursive=true, *filenames, visitor);
+        if !ok {
+            add_file_based_on_extension(*filenames, it);
+        }
+    }
+
+    pre, post, mids := extract_unique_middles(filenames);
+    if filenames.count > 1 {
+        log("filenames: %1%2%3", pre, mids, post);
+    }
+
+    if filenames.count == 1 {
+        filename := filenames[0];
+        log("reading file '%'", filename);
+        new_data, ok := read_entire_file(filename);
+        assert(ok);
+        return new_data;
+    }
+
+    buffer.parsing_state = "reading from files";
+
+    files: [..] string;
+    files.allocator = temp;
+    array_reserve(*files, filenames.count);
+
+    sources: [..] string;
+    sources.allocator = temp;
+    array_reserve(*sources, filenames.count);
+    source_max_len := 0;
+
+    for filenames {
+        source := mids[it_index];
+        log("reading file '%' (source: '%')", it, source);
+        data, ok := read_entire_file(it);
+        assert(ok);
+        array_add(*files, data);
+
+        source_max_len = max(source_max_len, source.count);
+        array_add(*sources, source);
+    }
+
+    buffer.parsing_state = "preprocessing files";
+    Line_To_Sort :: struct { timestamp: Calendar_Time; timestamp_streak: s64; line: string; source: string; };
+    compare_line_to_sort :: (l: Line_To_Sort, r: Line_To_Sort) -> int {
+        t := inline compare_calendar_time(l.timestamp, r.timestamp);
+        if t != 0 return t;
+        return l.timestamp_streak - r.timestamp_streak;
+    }
+    lines_to_sort: [..] Line_To_Sort;
+    defer array_reset(*lines_to_sort);
+    total_size := 0;
+
+    info: Log_Line_Info;
+    info.timestamp = to_calendar(seconds_to_apollo(0));
+
+    streak: s64 = 0;
+    prev_timestamp: Calendar_Time;
+
+    for file: files {
+        tail := file;
+        source := sources[it_index];
+        while tail {
+            found:, line:, tail = split_from_left(tail, #char "\n");
+            ok := parse_log_line(null, line, *info, mode=.ONLY_TIMESTAMP);
+
+            if ok && info.timestamp < skip_until {
+                buffer.skipped_based_on_timestamp += 1;
+                continue;
+            }
+
+            if info.timestamp == prev_timestamp { streak += 1; } else { streak = 0; }
+            prev_timestamp = info.timestamp;
+
+            array_add(*lines_to_sort, .{info.timestamp, streak, line, source});
+            total_size += line.count;
+            // for one "\n" after each line
+            total_size += 1;
+            // +3 for ' | ' after the source
+            total_size += source_max_len + 3;
+        }
+    }
+
+    buffer.parsing_state = "sorting logs";
+    t0 := seconds_since_init();
+    quick_sort(lines_to_sort, compare_line_to_sort);
+    quicksort_duration = seconds_since_init() - t0;
+    log("quicksort_duration: %", quicksort_duration);
+
+    new_data := alloc_string(total_size);
+
+    buffer.parsing_state = "copying data";
+    p := new_data.data;
+    for lines_to_sort {
+        write_to_pointer(*p, it.source);
+
+        padding := source_max_len - it.source.count;
+        for 1..padding write_to_pointer(*p, " ");
+
+        write_to_pointer(*p, " | ");
+        write_to_pointer(*p, it.line);
+        write_to_pointer(*p, "\n");
+    }
+    assert(p == new_data.data + total_size);
+
+    return new_data;
 }
 
 process_text_buffer_data :: (using buffer: *Log_Text_Buffer, skip_until: Calendar_Time = .{}) {
@@ -1754,12 +1790,16 @@ process_text_buffer_data :: (using buffer: *Log_Text_Buffer, skip_until: Calenda
         found:, line:, tail = split_from_left(tail, #char "\n");
 
         temp_info: Log_Line_Info;
-        parse_log_line(null, line, *temp_info, mode=.ONLY_TIMESTAMP);
-        if temp_info.timestamp >= skip_until {
-            start := line.data - all_text.data;
-            tail = advance(all_text, start);
-            break;
+        ok := parse_log_line(null, line, *temp_info, mode=.ONLY_TIMESTAMP);
+        // ignore `ok`
+        if temp_info.timestamp < skip_until {
+            buffer.skipped_based_on_timestamp += 1;
+            continue;
         }
+
+        start := line.data - all_text.data;
+        tail = advance(all_text, start);
+        break;
     }
 
     if tail.count != all_text.count {
@@ -1834,6 +1874,7 @@ process_text_buffer_data :: (using buffer: *Log_Text_Buffer, skip_until: Calenda
             log("    %: %", it_index, it);
         }
     }
+    log("skipped % based on timestamp %", skipped_based_on_timestamp, skip_until);
 
     // for escape_code_stats {
     //     log("'%': %, seen % times", cast(Ascii_Or_Hex) it_index, parse_escape_sequence(it_index), it);
@@ -2206,7 +2247,7 @@ parse_log_line :: (buffer: *Log_Text_Buffer, line: string, info: *Log_Line_Info,
     source_start := cursor;
     while cursor < line.count {
         c := line[cursor];
-        if !(is_alpha(c) || is_digit(c) || c == #char ":" || c == #char "_" || c == #char "-") break;
+        if !(is_alpha(c) || is_digit(c) || c == #char ":" || c == #char "_" || c == #char "-" || c == #char "/") break;
         cursor += 1;
     }
     source: string;
@@ -2231,12 +2272,25 @@ parse_log_line :: (buffer: *Log_Text_Buffer, line: string, info: *Log_Line_Info,
     while (cursor < line.count) && (inline is_space(line[cursor])) cursor += 1;
 
     //
+    // optional syslog prefix
+    //
+    syslog_info, ok, tail := parse_syslog_prefix(advance(line, cursor));
+    if ok {
+        cursor = ifx tail then tail.data - line.data else line.count;
+
+        // skip whitespace
+        while (cursor < line.count) && (inline is_space(line[cursor])) cursor += 1;
+    }
+
+    //
     // parse time stamp
     //
 
     timestamp_start := cursor;
-    timestamp, status, tail := parse_date_timestamp(advance(line, cursor));
+    timestamp:, status:, tail = parse_date_timestamp(advance(line, cursor));
     if status != .FULL {
+        #if mode == .ONLY_TIMESTAMP return false;
+
         source_is_not_number := false;
         for source if !inline is_digit(it) { source_is_not_number = true; break; }
 
@@ -5336,6 +5390,182 @@ test_parse_date_timestamp :: () {
     }
 }
 
+Syslog_Line_Info :: struct {
+    timestamp: Calendar_Time;
+    hostname: string;
+    process: string;
+    pid: s32 = -1;
+}
+
+parse_syslog_prefix :: (input: string) -> (info: Syslog_Line_Info, ok: bool, tail: string) {
+    _0 :: #char "0";
+
+    result: Syslog_Line_Info;
+    // Won't be able to parse this
+    result.timestamp.day_of_week_starting_at_0 = -1;
+    tail := input;
+
+    cursor := 0;
+
+    // skip whitespace
+    while (cursor < input.count) && (inline is_space(input[cursor])) cursor += 1;
+    tail = advance(input, cursor);
+    if cursor >= input.count return result, false, tail;
+
+    //
+    // parse date `Month DD`
+    //
+
+    month_start := cursor;
+    // month
+    {
+        // skip non whitespace
+        while (cursor < input.count) && !(inline is_space(input[cursor])) cursor += 1;
+        tail = advance(input, cursor);
+
+        if cursor == month_start return result, false, tail;
+
+        month_name := slice(input, month_start, cursor - month_start);
+
+        supported_months :: string.["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+        ok, month_starting_at_0 := array_find(supported_months, slice(month_name, 0, 3));
+        if ok {
+            result.timestamp.month_starting_at_0 = xx month_starting_at_0;
+        }
+    }
+
+    // skip whitespace
+    while (cursor < input.count) && (inline is_space(input[cursor])) cursor += 1;
+    tail = advance(input, cursor);
+    if cursor >= input.count return result, false, tail;
+
+    // day
+    if input.count - cursor < 2 return result, false, tail;
+    {
+        d0 := xx input[cursor]; cursor += 1;
+        d1 := xx input[cursor]; cursor += 1;
+        if !(inline is_digit(d0)) || !(inline is_digit(d1)) return result, false, tail;
+        result.timestamp.day_of_month_starting_at_0 = xx ((d0 - _0) * 10 + (d1 - _0) - 1);
+    }
+
+    tail = advance(input, cursor);
+    if cursor >= input.count return result, false, tail;
+
+    // skip whitespace
+    while (cursor < input.count) && (inline is_space(input[cursor])) cursor += 1;
+    tail = advance(input, cursor);
+    if cursor >= input.count return result, false, tail;
+
+    //
+    // parse time `HH:MM:SS` (any separator)
+    //
+    if input.count - cursor < 8 return result, false, tail;
+
+    // hour
+    {
+        h0 := xx input[cursor]; cursor += 1;
+        h1 := xx input[cursor]; cursor += 1;
+        if !(inline is_digit(h0)) || !(inline is_digit(h1)) return result, false, tail;
+        result.timestamp.hour = xx ((h0 - _0) * 10 + (h1 - _0));
+    }
+
+    // separator
+    sep := input[cursor]; cursor += 1;
+    if (inline is_digit(sep)) || (inline is_alpha(sep)) return result, false, tail;
+
+    // minute
+    {
+        m0 := input[cursor]; cursor += 1;
+        m1 := input[cursor]; cursor += 1;
+        if !(inline is_digit(m0)) || !(inline is_digit(m1)) return result, false, tail;
+        result.timestamp.minute = xx ((m0 - _0) * 10 + (m1 - _0));
+    }
+
+    // separator
+    sep = input[cursor]; cursor += 1;
+    if (inline is_digit(sep)) || (inline is_alpha(sep)) return result, false, tail;
+
+    // second
+    {
+        s0 := input[cursor]; cursor += 1;
+        s1 := input[cursor]; cursor += 1;
+        if !(inline is_digit(s0)) || !(inline is_digit(s1)) return result, false, tail;
+        result.timestamp.second = xx ((s0 - _0) * 10 + (s1 - _0));
+    }
+
+    tail = advance(input, cursor);
+
+    // skip whitespace
+    while (cursor < input.count) && (inline is_space(input[cursor])) cursor += 1;
+    tail = advance(input, cursor);
+    if cursor >= input.count return result, false, tail;
+
+    //
+    // parse `$hostname $process[$pid]:`
+    //
+
+    // `$hostname`
+    {
+        hostname_start := cursor;
+
+        // skip non whitespace
+        while (cursor < input.count) && !(inline is_space(input[cursor])) cursor += 1;
+        tail = advance(input, cursor);
+
+        hostname_count := cursor - hostname_start;
+        result.hostname = slice(input, hostname_start, hostname_count);
+    }
+
+    // skip whitespace
+    while (cursor < input.count) && (inline is_space(input[cursor])) cursor += 1;
+    tail = advance(input, cursor);
+    if cursor >= input.count return result, false, tail;
+
+    // `$process`
+    {
+        process_start := cursor;
+
+        while (cursor < input.count) && (input[cursor] != #char "[") cursor += 1;
+        tail = advance(input, cursor);
+
+        process_count := cursor - process_start;
+        result.process = slice(input, process_start, process_count);
+    }
+
+    // `[$pid]`
+    {
+        if input.count - cursor < 1 return result, false, tail;
+        if input[cursor] != #char "[" return result, false, tail;
+        cursor += 1;
+
+        pid: s32 = 0;
+        while cursor < input.count {
+            c := input[cursor];
+            if !inline is_digit(c) break;
+            pid = pid * 10 + cast(s32, c - _0);
+            cursor += 1;
+        }
+
+        if input.count - cursor < 1 return result, false, tail;
+        if input[cursor] != #char "]" return result, false, tail;
+        cursor += 1;
+
+        result.pid = pid;
+    }
+
+    // `:`
+    if cursor < input.count && input[cursor] == #char ":" then cursor += 1;
+    tail = advance(input, cursor);
+
+    //
+    // finalize
+    //
+
+    result.timestamp.year = to_calendar(current_time_consensus()).year;
+
+    return result, true, tail;
+}
+
 common_prefix :: (values: [] string) -> string {
     if !values return "";
 
@@ -5382,6 +5612,25 @@ common_postfix :: (values: [] string) -> string {
     return best_so_far;
 }
 
+extract_unique_middles :: (values: [] string) -> (pre: string, post: string, mids: [] string) {
+    pre := common_prefix(values);
+    post := common_postfix(values);
+    mids: [..] string;
+
+    for values {
+        if pre == it {
+            assert(post == pre);
+            array_add(*mids, "");
+            continue;
+        }
+        curr := it;
+        curr = advance(curr, pre.count);
+        curr = slice(curr, 0, curr.count - post.count);
+        array_add(*mids, curr);
+    }
+
+    return pre, post, mids;
+}
 
 test_common_prefix_or_postfix :: () {
     values := string.[
@@ -5401,6 +5650,21 @@ test_common_prefix_or_postfix :: () {
     pretty_assert(common_postfix(.["ass"]) == "ass");
     pretty_assert(common_postfix(.["foooooooooo", "bor"]) == "");
     pretty_assert(common_postfix(values) == "z.txt");
+
+    pre: string;
+    post: string;
+    mids: [] string;
+
+    pre, post, mids = extract_unique_middles(.[],, temp);
+    pretty_assert(array_equals(mids, string.[]));
+    pre, post, mids = extract_unique_middles(.["1"],, temp);
+    pretty_assert(array_equals(mids, string.[""]));
+    pre, post, mids = extract_unique_middles(.["ass"],, temp);
+    pretty_assert(array_equals(mids, string.[""]));
+    pre, post, mids = extract_unique_middles(.["foooooooooo", "bor"],, temp);
+    pretty_assert(array_equals(mids, string.["foooooooooo", "bor"]));
+    pre, post, mids = extract_unique_middles(values,, temp);
+    pretty_assert(array_equals(mids, string.["ar/ba", "ar/ball", "i"]));
 }
 
 hex_color :: ($hex: string, $loc := #caller_location) -> Vector4 #expand {
