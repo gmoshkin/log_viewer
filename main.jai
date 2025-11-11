@@ -179,15 +179,6 @@ ui_font := My_Dynamic_Font.{
 text_pane_rect: Rectangle;
 left_column_rect: Rectangle;
 
-scroll_rows: float64 = 0.0;
-target_scroll_rows: float64 = 0.0;
-scroll_rows_lerp_factor := 0.5;
-scroll_rows_at_click: float64 = 0.0;
-
-scroll_columns := 0.0;
-target_scroll_columns := 0.0;
-scroll_columns_lerp_factor := 0.5;
-
 window_bg_color :: #run hex_color("191919");
 
 draggin_scroll_bar := false;
@@ -573,6 +564,7 @@ update_and_draw_frame :: () -> bool {
             case .SEARCH_MATCH; line_index = search_results.matches[hovered_scroll_bar_anchor_index].line_index;
         }
         if is_click(.MOUSE_BUTTON_LEFT) {
+            old_target_scroll_rows = target_scroll_rows;
             target_scroll_rows = xx (line_index - text_pane_row_count / 2);
         } else if is_click(.MOUSE_BUTTON_RIGHT) {
             anchor_button_open_popup_menu(line_index, mouse);
@@ -583,6 +575,7 @@ update_and_draw_frame :: () -> bool {
         pixels_from_top := top(scroll_bar_rect) - mouse.y;
         fraction_from_top := pixels_from_top / height(scroll_bar_rect);
         line_index := total_line_count * fraction_from_top;
+        old_target_scroll_rows = target_scroll_rows;
         target_scroll_rows = xx (line_index - text_pane_row_count / 2);
     }
 
@@ -954,21 +947,31 @@ update_and_draw_frame :: () -> bool {
         elapsed := seconds_since_init() - t0;
         print(*builder, "% %\n", frame_counter, fmt(elapsed, 6));
         print(*builder, "scroll: %, %\n", fmt(scroll_columns, 1), fmt(scroll_rows, 1));
-        print(*builder, "mouse focus: %\n", mouse_focus);
+
+        jump_duration, ok := calculate_last_jump_duration();
+        print(*builder, "jump time: ");
+        if ok {
+            print_pretty_duration(*builder, jump_duration);
+        } else {
+            print(*builder, "?");
+        }
+        append(*builder, "\n");
+
+        // print(*builder, "mouse focus: %\n", mouse_focus);
         if the_text_search_ui.flags & .OPEN print(*builder, "search matches: %\n", search_results.matches.count);
         if hovered_scroll_bar_anchor_index != -1 then print(*builder, "% %\n", hovered_scroll_bar_anchor_kind, hovered_scroll_bar_anchor_index);
         // if quicksort_duration then print(*builder, "quicksort_duration: %\n", quicksort_duration);
         if scroll_bar_rectangles_drawn then print(*builder, "scrollbar drawn quads: %\n", scroll_bar_rectangles_drawn);
 
 
-        if the_text_search_ui.completions.values {
-            print(*builder, "matched prefix: %\n", the_text_search_ui.completions.matched_prefix_length);
-        }
+        // if the_text_search_ui.completions.values {
+        //     print(*builder, "matched prefix: %\n", the_text_search_ui.completions.matched_prefix_length);
+        // }
         for array_view(the_text_search_ui.completions.values, 0, 16) {
             print(*builder, "%\n", it);
         }
         if the_text_search_ui.completions.values.count > 16 {
-            print(*builder, "...");
+            print(*builder, "...\n");
         }
 
         for redraw_reasons print(*builder, "%\n", it);
@@ -992,6 +995,71 @@ update_and_draw_frame :: () -> bool {
 //
 // scroll bar stuff
 //
+
+scroll_rows: float64 = 0.0;
+target_scroll_rows: float64 = 0.0;
+old_target_scroll_rows: float64 = 0.0;
+
+scroll_rows_lerp_factor := 0.5;
+scroll_rows_at_click: float64 = 0.0;
+
+scroll_columns := 0.0;
+target_scroll_columns := 0.0;
+scroll_columns_lerp_factor := 0.5;
+
+jump_destination_row_offset :: inline () -> float64 {
+    n_lines_per_screen := height(text_pane_rect) / cast(float) main_font.line_height;
+    return n_lines_per_screen / 2.0 - 3;
+}
+
+get_instant_for_line :: (line_index: int) -> Apollo_Time {
+    timestamp := the_text_buffer.line_infos[line_index].timestamp;
+    if timestamp.year {
+        return calendar_to_apollo(timestamp);
+    }
+
+    before: Apollo_Time;
+    after: Apollo_Time;
+
+    i := line_index - 1;
+    while i >= 0 {
+        timestamp := the_text_buffer.line_infos[i].timestamp;
+        if timestamp.year {
+            before = calendar_to_apollo(timestamp);
+            break;
+        }
+        i -= 1;
+    }
+
+    i = line_index + 1;
+    while i < the_text_buffer.line_infos.count {
+        timestamp := the_text_buffer.line_infos[i].timestamp;
+        if timestamp.year {
+            after = calendar_to_apollo(timestamp);
+            break;
+        }
+        i += 1;
+    }
+
+    if !before return after;
+    if !after return before;
+
+    return (before + after) / 2;
+}
+
+calculate_last_jump_duration :: () -> float64, bool {
+    old_index := cast(int, old_target_scroll_rows + jump_destination_row_offset());
+    old_instant := get_instant_for_line(old_index);
+    if !old_instant return 0.0, false;
+
+    new_index := cast(int, target_scroll_rows + jump_destination_row_offset());
+    new_instant := get_instant_for_line(new_index);
+    if !new_instant return 0.0, false;
+
+    diff := new_instant - old_instant;
+    duration := abs(to_float64_seconds(diff));
+    return duration, true;
+}
 
 // I hate this procedure
 do_scroll_bar_anchors :: (parent_rect: Rectangle, anchors: [] $T, color: Vector4, $mode: enum { DRAW; GET_HOVER; }, target_in_rect: Vector2, $$t := 10.0) -> (index: s64) {
@@ -3409,9 +3477,7 @@ save_completions :: (ui: *Text_Search_UI, new_completions: Completions) {
 }
 
 jump_to_next_search_match :: (forwards: bool) {
-    n_lines_per_screen := height(text_pane_rect) / cast(float) main_font.line_height;
-    jump_destination_row_offset := n_lines_per_screen / 2.0 - 3;
-    effective_position := target_scroll_rows + jump_destination_row_offset;
+    effective_position := target_scroll_rows + jump_destination_row_offset();
     current_line_index := cast(int) floor(effective_position);
     if effective_position - xx current_line_index > 0 && forwards {
         current_line_index += 1;
@@ -3436,7 +3502,8 @@ jump_to_next_search_match :: (forwards: bool) {
     }
 
     if matched_line_index >= 0 {
-        target_scroll_rows = matched_line_index - jump_destination_row_offset;
+        old_target_scroll_rows = target_scroll_rows;
+        target_scroll_rows = matched_line_index - jump_destination_row_offset();
     }
 }
 
@@ -5118,6 +5185,31 @@ my_logger :: (message: string, data: *void, info: Log_Info) {
     if info.common_flags & (.ERROR | .WARNING) print(*builder, "\e[0m");
 
     write_builder(*builder);
+}
+
+print_pretty_duration :: (builder: *String_Builder, duration_in_seconds: float64) {
+    whole_seconds := cast(int, duration_in_seconds);
+    need_space := false;
+    if whole_seconds > 3600 {
+        hours := whole_seconds / 3600;
+        print(builder, "%h", FormatInt.{value = hours});
+        need_space = true;
+    }
+
+    if whole_seconds > 60 {
+        minutes := (whole_seconds % 3600) / 60;
+        if need_space append(builder, " ");
+        print(builder, "%m", FormatInt.{value = minutes});
+        need_space = true;
+    }
+
+    {
+        seconds := whole_seconds % 60;
+        milliseconds := cast(int, frac(duration_in_seconds) * 1000);
+        if need_space append(builder, " ");
+        print(builder, "%.%s", FormatInt.{value = seconds},
+                               FormatInt.{value = milliseconds, minimum_digits = 3});
+    }
 }
 
 print_time_for_log :: (builder: *String_Builder, date_time: Calendar_Time) {
