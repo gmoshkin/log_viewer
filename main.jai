@@ -197,6 +197,7 @@ scroll_bar_slider_color := #run hex_color("d0d0d0");
 scroll_bar_anchor_min_width := 1.7;
 scroll_bar_effective_slider_color := #run hex_color("808080");
 scroll_bar_anchor_hover_color := #run hex_color("e0e0e0");
+scroll_bar_rectangles_drawn: int;
 
 hovered_scroll_bar_anchor_kind: enum { EXPLICIT; SEARCH_MATCH; };
 hovered_scroll_bar_anchor_index: s64 = -1;
@@ -785,6 +786,7 @@ update_and_draw_frame :: () -> bool {
         }
     }
 
+    scroll_bar_rectangles_drawn = 0;
     Profile("draw scroll bar");
     // draw scroll bar
     if !the_text_buffer.parsing_in_progress
@@ -792,9 +794,14 @@ update_and_draw_frame :: () -> bool {
         parent_rect := *scroll_bar_rect;
         // draw visible scroll bar slider
         draw_axis_aligned_rectangle(scroll_bar_slider_rect, scroll_bar_slider_color);
+        scroll_bar_rectangles_drawn += 1;
 
         x := scroll_bar_slider_rect.left;
         w := scroll_bar_slider_rect.width;
+
+        skip_start := 0.0;
+        skipped_colors: [..] Vector4;
+        skipped_colors.allocator = temp;
 
         // draw log ranges of same source
         for i: 0..the_text_buffer.log_ranges_of_source.count-2 {
@@ -805,7 +812,32 @@ update_and_draw_frame :: () -> bool {
             y_bottom := parent_rect.top - the_text_buffer.log_ranges_of_source[i + 1].start_index / cast(float) lines_per_scroll_bar_pixel;
 
             color := get_log_source_color(range.source_id);
+
+            // not going to be visible
+            if y_top - y_bottom < .5
+            {
+                if !skipped_colors {
+                    skip_start = y_top;
+                }
+                array_add(*skipped_colors, color);
+
+                if skip_start - y_bottom >= 1 {
+                    color = .{};
+                    q := 1.0 / skipped_colors.count;
+                    for skipped_colors {
+                        color += it * q;
+                    }
+
+                    draw_axis_aligned_rectangle(xx x, y_bottom, xx w, skip_start - y_bottom, color);
+                    scroll_bar_rectangles_drawn += 1;
+
+                    skipped_colors.count = 0;
+                }
+                continue;
+            }
+
             draw_axis_aligned_rectangle(xx x, y_bottom, xx w, y_top - y_bottom, color);
+            scroll_bar_rectangles_drawn += 1;
         }
 
         // draw active anchor range on scroll bar
@@ -824,6 +856,7 @@ update_and_draw_frame :: () -> bool {
 
                 color := main_text_pane_dim_background_color;
                 draw_axis_aligned_rectangle(xx my_x, y_bottom, xx my_w, y_top - y_bottom, color);
+                scroll_bar_rectangles_drawn += 1;
             }
         }
 
@@ -864,6 +897,7 @@ update_and_draw_frame :: () -> bool {
                 W := width(rect) + slider_oversize;
                 H := height(rect) + 2 * slider_oversize;
                 draw_hollow_axis_aligned_rectangle(xx X, xx Y, xx W, xx H, border, scroll_bar_slider_color);
+                scroll_bar_rectangles_drawn += 4;
             }
 
             // draw effective scroll bar slider
@@ -877,6 +911,7 @@ update_and_draw_frame :: () -> bool {
                 scroll_y := cast(float, scroll_rows) / lines_per_scroll_bar_pixel;
                 y := scroll_bar_rect.top - scroll_y - h;
                 draw_hollow_axis_aligned_rectangle(xx x, y, xx w, xx h, 2, color);
+                scroll_bar_rectangles_drawn += 4;
             }
         }
     }
@@ -920,7 +955,8 @@ update_and_draw_frame :: () -> bool {
         print(*builder, "mouse focus: %\n", mouse_focus);
         if the_text_search_ui.flags & .OPEN print(*builder, "search matches: %\n", search_results.matches.count);
         if hovered_scroll_bar_anchor_index != -1 then print(*builder, "% %\n", hovered_scroll_bar_anchor_kind, hovered_scroll_bar_anchor_index);
-        if quicksort_duration then print(*builder, "quicksort_duration: %\n", quicksort_duration);
+        // if quicksort_duration then print(*builder, "quicksort_duration: %\n", quicksort_duration);
+        if scroll_bar_rectangles_drawn then print(*builder, "scrollbar drawn quads: %\n", scroll_bar_rectangles_drawn);
 
 
         if the_text_search_ui.completions.values {
@@ -1024,8 +1060,10 @@ draw_scroll_bar_anchor :: (x: float, y: float, w: float, h: float, $$t: float, c
     if hover {
         draw_axis_aligned_rectangle(x, y - 1, xx w, 1, hover_color);
         draw_axis_aligned_rectangle(x, y + h, xx w, 1, hover_color);
+        scroll_bar_rectangles_drawn += 2;
     }
     draw_axis_aligned_rectangle(xx x, y, xx w, h, color);
+    scroll_bar_rectangles_drawn += 1;
     {
         Y := y + h / 2;
         p0, p1, p2 := get_scroll_bar_triangle(t, x, Y);
@@ -1033,6 +1071,7 @@ draw_scroll_bar_anchor :: (x: float, y: float, w: float, h: float, $$t: float, c
             draw_triangle(p0 + .{ 2, 0 }, p1 + .{ -1.333333, -2 }, p2 + .{ -1.333333, 2 }, hover_color);
         }
         draw_triangle(p0, p1, p2, color);
+        scroll_bar_rectangles_drawn += 1; // not really a recangle ...
     }
 
 }
