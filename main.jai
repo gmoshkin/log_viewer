@@ -103,7 +103,8 @@ main :: () {
     start_parsing_thread(*the_text_buffer);
 
     Profile();
-    request_load_text_buffer_data(*the_text_buffer, input_file_full_paths, input_from_clipboard, skip_until_timestamp);
+    filenames := get_log_filenames_from_paths(input_file_full_paths);
+    request_load_text_buffer_data(*the_text_buffer, filenames, input_from_clipboard, skip_until_timestamp);
     Profile();
 
     reload_main_font();
@@ -449,7 +450,8 @@ update_and_draw_frame :: () -> bool {
         }
 
         else if it.type == .DRAG_AND_DROP_FILES {
-            request_load_text_buffer_data(*the_text_buffer, it.files);
+            filenames := get_log_filenames_from_paths(it.files);
+            request_load_text_buffer_data(*the_text_buffer, filenames);
         }
 
         // modules/Input doesn't set it.ctrl_pressed for MOUSE_WHEEL :(
@@ -1642,13 +1644,18 @@ load_text_buffer_data :: (buffer: *Log_Text_Buffer, _filenames: [] string = .[],
     Profile("process_text_buffer_data");
 }
 
-load_data_from_files :: (buffer: *Log_Text_Buffer, filepaths: [] string, skip_until: Calendar_Time) -> data: string {
+get_log_filenames_from_paths :: (filepaths: [] string) -> [] string {
     filenames: [..] string;
     filenames.allocator = temp;
 
     add_file_based_on_extension :: (filenames: *[..] string, filepath: string) {
-        ext, found := path_extension(filepath);
-        if !found || ext == "log" || ext == "txt" {
+        _, name, ext := path_decomp(filepath);
+        if !name || name[0] == "." {
+            log_error("ignoring file path '%'", filepath);
+            return;
+        }
+
+        if ext == "" || ext == "log" || ext == "txt" {
             array_add(filenames, filepath);
         } else {
             log_error("ignoring file path '%'", filepath);
@@ -1666,6 +1673,10 @@ load_data_from_files :: (buffer: *Log_Text_Buffer, filepaths: [] string, skip_un
         }
     }
 
+    return filenames;
+}
+
+load_data_from_files :: (buffer: *Log_Text_Buffer, filenames: [] string, skip_until: Calendar_Time) -> data: string {
     pre, post, mids := extract_unique_middles(filenames);
     if filenames.count > 1 {
         log("filenames: %1%2%3", pre, mids, post);
@@ -1713,7 +1724,6 @@ load_data_from_files :: (buffer: *Log_Text_Buffer, filepaths: [] string, skip_un
     total_size := 0;
 
     info: Log_Line_Info;
-    info.timestamp = to_calendar(seconds_to_apollo(0));
 
     streak: s64 = 0;
     prev_timestamp: Calendar_Time;
@@ -1721,6 +1731,11 @@ load_data_from_files :: (buffer: *Log_Text_Buffer, filepaths: [] string, skip_un
     for file: files {
         tail := file;
         source := sources[it_index];
+
+        // reset info for each file
+        prev_timestamp = .{};
+        info.timestamp = to_calendar(seconds_to_apollo(0));
+
         while tail {
             found:, line:, tail = split_from_left(tail, #char "\n");
             ok := parse_log_line(null, line, *info, mode=.ONLY_TIMESTAMP);
@@ -2247,7 +2262,7 @@ parse_log_line :: (buffer: *Log_Text_Buffer, line: string, info: *Log_Line_Info,
     source_start := cursor;
     while cursor < line.count {
         c := line[cursor];
-        if !(is_alpha(c) || is_digit(c) || c == #char ":" || c == #char "_" || c == #char "-" || c == #char "/") break;
+        if (inline is_space(c)) break;
         cursor += 1;
     }
     source: string;
@@ -2276,6 +2291,10 @@ parse_log_line :: (buffer: *Log_Text_Buffer, line: string, info: *Log_Line_Info,
     //
     syslog_info, ok, tail := parse_syslog_prefix(advance(line, cursor));
     if ok {
+        info.timestamp = syslog_info.timestamp;
+        info.timestamp_start = xx (cursor + syslog_info.timestamp_start);
+        info.timestamp_count = syslog_info.timestamp_count;
+
         cursor = ifx tail then tail.data - line.data else line.count;
 
         // skip whitespace
@@ -2370,101 +2389,138 @@ parse_log_line :: (buffer: *Log_Text_Buffer, line: string, info: *Log_Line_Info,
         table_add(*buffer.sources_to_pid, source, pid);
 
     //
-    // parse thread/fiber id/fiber name
+    // parse `$thread_name[/$fiber_id/$fiber_name/$module] [$file:$line]`
     //
 
     // skip whitespace
     while (cursor < line.count) && (inline is_space(line[cursor])) cursor += 1;
 
-    // thread name
+    // `$thread_name`
     thread_name_start := cursor;
 
-    while (cursor < line.count) && (line[cursor] != #char "/") cursor += 1;
+    while (cursor < line.count) {
+        if (line[cursor] == #char "/") break;
+        if (line[cursor] == #char " ") break;
+        cursor += 1;
+    }
     if cursor == line.count return false;
 
     thread_name_end := cursor;
-    assert(line[cursor] == #char "/"); cursor += 1;
 
-    // Tarantool's human-readable log format is impossible to parse.
-    // Here's a dumb heuristic
-
-    // fiber id
-    fiber_id: s16;
-    fiber_id_start := cursor;
-    while cursor < line.count {
-        fiber_id_start = cursor;
-        while (cursor < line.count) && (line[cursor] != #char "/") cursor += 1;
-        if cursor == line.count return false;
-        assert(line[cursor] == #char "/");
-
-        text := slice(line, fiber_id_start, cursor - fiber_id_start);
-        fiber_id = inline parse_positive_number(text, s16);
-        if fiber_id != 0 break;
-
-        thread_name_end = cursor;
+    if line[cursor] == #char "/" {
         cursor += 1;
+
+        // Tarantool's human-readable log format is impossible to parse.
+        // Here's a dumb heuristic
+
+        // `$fiber_id`
+        fiber_id: s16;
+        fiber_id_start := cursor;
+        while cursor < line.count {
+            fiber_id_start = cursor;
+            while (cursor < line.count) && (line[cursor] != #char "/") cursor += 1;
+            if cursor == line.count return false;
+            assert(line[cursor] == #char "/");
+
+            text := slice(line, fiber_id_start, cursor - fiber_id_start);
+            fiber_id = inline parse_positive_number(text, s16);
+            if fiber_id != 0 break;
+
+            thread_name_end = cursor;
+            cursor += 1;
+        }
+
+        thread_name := slice(line, thread_name_start, thread_name_end - thread_name_start);
+        thread_name_offset := add_thread_name(*buffer.all_thread_names, thread_name);
+        info.thread_name_offset = thread_name_offset;
+        info.thread_name_start = xx thread_name_start;
+        info.thread_name_count = xx thread_name.count;
+
+        assert(fiber_id != 0);
+        info.fiber_id = fiber_id;
+        info.fiber_id_start = xx fiber_id_start;
+        info.fiber_id_count = xx (cursor - fiber_id_start);
+
+        array_add_if_unique(*buffer.all_fiber_ids, fiber_id);
+
+        assert(line[cursor] == #char "/"); cursor += 1;
+
+        // `$fiber_name/[$module] [$file:$line]`
+        fiber_name_start := cursor;
+        while cursor + 2 < line.count {
+            c0 := line[cursor];
+            c1 := line[cursor + 1];
+            c2 := line[cursor + 2];
+            if c0 == #char " " && c2 == #char ">" && (c1 >= #char "A" && c1 <= #char "Z") break;
+            cursor += 1;
+        }
+
+        fiber_name := slice(line, fiber_name_start, cursor - fiber_name_start);
+
+        fiber_name=, module_name, location := parse_fiber_name_and_the_rest_of_the_garbage(fiber_name);
+        fiber_name_offset := add_fiber_name(*buffer.all_fiber_names, fiber_name);
+        info.fiber_name_offset = fiber_name_offset;
+        info.fiber_name_start = xx fiber_name_start;
+        info.fiber_name_count = xx fiber_name.count;
+
+        if module_name {
+            module_name_offset := add_module_name(*buffer.all_module_names, module_name);
+            info.module_name_offset = module_name_offset;
+            info.module_name_start = xx (module_name.data - line.data);
+            info.module_name_count = xx module_name.count;
+        }
+
+        if location {
+            location_offset := add_module_name(*buffer.all_source_locations, location);
+            info.location_offset = location_offset;
+            info.location_start = xx (location.data - line.data);
+            info.location_count = xx location.count;
+        }
+    } else {
+        thread_name := slice(line, thread_name_start, thread_name_end - thread_name_start);
+        thread_name_offset := add_thread_name(*buffer.all_thread_names, thread_name);
+        info.thread_name_offset = thread_name_offset;
+        info.thread_name_start = xx thread_name_start;
+        info.thread_name_count = xx thread_name.count;
+
+        // skip whitespace
+        while (cursor < line.count) && (inline is_space(line[cursor])) cursor += 1;
+
+        start := cursor;
+
+        // skip non whitespace
+        while (cursor < line.count) && (!inline is_space(line[cursor])) cursor += 1;
+
+        // `$file:$line`
+        maybe_source_location := slice(line, start, cursor - start);
+        ok := parse_source_location(maybe_source_location);
+        if ok {
+            location := maybe_source_location;
+            location_offset := add_module_name(*buffer.all_source_locations, location);
+            info.location_offset = location_offset;
+            info.location_start = xx (location.data - line.data);
+            info.location_count = xx location.count;
+        } else {
+            cursor = start;
+        }
     }
 
-    thread_name := slice(line, thread_name_start, thread_name_end - thread_name_start);
-    thread_name_offset := add_thread_name(*buffer.all_thread_names, thread_name);
-    info.thread_name_offset = thread_name_offset;
-    info.thread_name_start = xx thread_name_start;
-    info.thread_name_count = xx thread_name.count;
-
-    assert(fiber_id != 0);
-    info.fiber_id = fiber_id;
-    info.fiber_id_start = xx fiber_id_start;
-    info.fiber_id_count = xx (cursor - fiber_id_start);
-
-    array_add_if_unique(*buffer.all_fiber_ids, fiber_id);
-
-    assert(line[cursor] == #char "/"); cursor += 1;
-
-    // fiber name
-    fiber_name_start := cursor;
-    while cursor + 2 < line.count {
-        c0 := line[cursor];
-        c1 := line[cursor + 1];
-        c2 := line[cursor + 2];
-        if c0 == #char " " && c2 == #char ">" && (c1 >= #char "A" && c1 <= #char "Z") break;
-        cursor += 1;
-    }
-
-    fiber_name := slice(line, fiber_name_start, cursor - fiber_name_start);
-
-    fiber_name=, module_name, location := parse_fiber_name_and_the_rest_of_the_garbage(fiber_name);
-    fiber_name_offset := add_fiber_name(*buffer.all_fiber_names, fiber_name);
-    info.fiber_name_offset = fiber_name_offset;
-    info.fiber_name_start = xx fiber_name_start;
-    info.fiber_name_count = xx fiber_name.count;
-
-    if module_name {
-        module_name_offset := add_module_name(*buffer.all_module_names, module_name);
-        info.module_name_offset = module_name_offset;
-        info.module_name_start = xx (module_name.data - line.data);
-        info.module_name_count = xx module_name.count;
-    }
-
-    if location {
-        location_offset := add_module_name(*buffer.all_source_locations, location);
-        info.location_offset = location_offset;
-        info.location_start = xx (location.data - line.data);
-        info.location_count = xx location.count;
-    }
+    // skip whitespace
+    while (cursor < line.count) && (inline is_space(line[cursor])) cursor += 1;
 
     //
-    // log level
+    // log level: `L>`
     //
     if cursor + 2 >= line.count return false;
+    if line[cursor + 1] != #char ">" return false;
 
-    assert(line[cursor] == #char " "); cursor += 1;
     log_level := line[cursor];
     info.log_level = log_level;
     info.log_level_start = xx cursor;
     array_add_if_unique(*buffer.all_log_levels, log_level);
 
-    cursor += 1;
-    assert(line[cursor] == #char ">"); cursor += 1;
+    cursor += 1; // `L`
+    cursor += 1; // `>`
 
     // the rest is just the log message
 
@@ -2519,8 +2575,8 @@ parse_fiber_name_and_the_rest_of_the_garbage :: (text: string) -> (fiber_name: s
     last_space := find_index_from_right(fiber_name, #char " ");
     if last_space != -1 {
         maybe_source_location := advance(fiber_name, last_space + 1);
-        found, file, line := split_from_left(maybe_source_location, #char ":");
-        if found && (parse_positive_number(line, int) != 0) {
+        ok := parse_source_location(maybe_source_location);
+        if ok {
             fiber_name.count = last_space;
             location = maybe_source_location;
         }
@@ -2529,6 +2585,15 @@ parse_fiber_name_and_the_rest_of_the_garbage :: (text: string) -> (fiber_name: s
     found:, fiber_name, module = split_from_left(fiber_name, #char "/");
 
     return fiber_name, module, location;
+}
+
+parse_source_location :: (input: string) -> (ok: bool, file: string, line: s32) {
+    found, file, line_text := split_from_left(input, #char ":");
+    if !found return false, "", -1;
+    line := parse_positive_number(line_text, s32);
+    if line == 0 return false, "", -1;
+
+    return true, file, line;
 }
 
 parse_positive_number :: (text: string, $T: Type) -> T
@@ -5395,6 +5460,9 @@ Syslog_Line_Info :: struct {
     hostname: string;
     process: string;
     pid: s32 = -1;
+
+    timestamp_start: u8;
+    timestamp_count: u8;
 }
 
 parse_syslog_prefix :: (input: string) -> (info: Syslog_Line_Info, ok: bool, tail: string) {
@@ -5415,6 +5483,7 @@ parse_syslog_prefix :: (input: string) -> (info: Syslog_Line_Info, ok: bool, tai
     //
     // parse date `Month DD`
     //
+    timestamp_start := cast(u8, cursor);
 
     month_start := cursor;
     // month
@@ -5493,6 +5562,10 @@ parse_syslog_prefix :: (input: string) -> (info: Syslog_Line_Info, ok: bool, tai
         result.timestamp.second = xx ((s0 - _0) * 10 + (s1 - _0));
     }
 
+    timestamp_count := cast(u8, cursor - timestamp_start);
+    result.timestamp_start = timestamp_start;
+    result.timestamp_count = timestamp_count;
+
     tail = advance(input, cursor);
 
     // skip whitespace
@@ -5561,10 +5634,15 @@ parse_syslog_prefix :: (input: string) -> (info: Syslog_Line_Info, ok: bool, tai
     // finalize
     //
 
-    result.timestamp.year = to_calendar(current_time_consensus()).year;
+    if !current_year {
+        current_year = to_calendar(current_time_consensus()).year;
+    }
+    result.timestamp.year = current_year;
 
     return result, true, tail;
 }
+
+current_year: s32;
 
 common_prefix :: (values: [] string) -> string {
     if !values return "";
