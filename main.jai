@@ -980,6 +980,34 @@ update_and_draw_frame :: () -> bool {
         draw_simple_text_pane(rect, font, .{x, y}, .TOP_LEFT, pane_text, hex_color("ffffff"), hex_color("181818"));
     }
 
+    // @TEMPORARY
+    /*
+    {
+        rect := window_rect;
+        font := ui_font.regular;
+        x := window_rect.width / 2;
+        y := window_rect.height / 2;
+
+        builder: String_Builder; builder.allocator = temp;
+
+        print(*builder, "you're pressing these keys:\n");
+
+        space_needed := false;
+        for Input.input_button_states {
+            if !(it & .DOWN) continue;
+            if !(it_index >= #char "A" && it_index <= #char "Z") &&
+               !(it_index >= #char "0" && it_index <= #char "9") continue;
+
+            if space_needed append(*builder, " ");
+            append(*builder, cast(u8, it_index));
+            space_needed = true;
+        }
+
+        pane_text := builder_to_string(*builder,, temp);
+        draw_simple_text_pane(rect, font, .{xx x, xx y}, .MIDDLE, pane_text, hex_color("ffffff"), hex_color("181818"));
+    }
+    */
+
     // Scissor doesn't work? Or I don't know how to use it???
     // Simp.set_scissor(0, 100, 0, 100);
     // Simp.clear_render_target(1, 0, 0, 1);
@@ -1048,6 +1076,8 @@ get_instant_for_line :: (line_index: int) -> Apollo_Time {
 }
 
 calculate_last_jump_duration :: () -> float64, bool {
+    if the_text_buffer.parsing_in_progress return -1, false;
+
     old_index := cast(int, old_target_scroll_rows + jump_destination_row_offset());
     old_instant := get_instant_for_line(old_index);
     if !old_instant return 0.0, false;
@@ -2322,6 +2352,28 @@ parse_log_line :: (buffer: *Log_Text_Buffer, line: string, info: *Log_Line_Info,
     first_non_whitespace := cursor;
 
     //
+    // optional bullshit gitlab ci log prefix
+    //
+    timestamp, status, tail := parse_date_timestamp(advance(line, cursor));
+    if status == .FULL
+        && tail.count >= 8
+        && tail[3] == #char "Z"
+        && (inline is_digit(tail[0]))
+        && (inline is_digit(tail[1]))
+        && (inline is_digit(tail[2]))
+        && (inline is_space(tail[4]))
+        && (inline is_digit(tail[5]))
+        && (inline is_digit(tail[6]))
+        && (inline is_alpha(tail[7]))
+    {
+        cursor = tail.data - line.data + 8;
+
+        // skip whitespace
+        while (cursor < line.count) && (inline is_space(line[cursor])) cursor += 1;
+        if cursor >= line.count return false;
+    }
+
+    //
     // parse source
     //
     // example: `default_2_3    |`
@@ -2357,7 +2409,7 @@ parse_log_line :: (buffer: *Log_Text_Buffer, line: string, info: *Log_Line_Info,
     //
     // optional syslog prefix
     //
-    syslog_info, ok, tail := parse_syslog_prefix(advance(line, cursor));
+    syslog_info:, ok:, tail = parse_syslog_prefix(advance(line, cursor));
     if ok {
         info.timestamp = syslog_info.timestamp;
         info.timestamp_start = xx (cursor + syslog_info.timestamp_start);
@@ -2374,7 +2426,7 @@ parse_log_line :: (buffer: *Log_Text_Buffer, line: string, info: *Log_Line_Info,
     //
 
     timestamp_start := cursor;
-    timestamp:, status:, tail = parse_date_timestamp(advance(line, cursor));
+    timestamp, status, tail = parse_date_timestamp(advance(line, cursor));
     if status != .FULL {
         #if mode == .ONLY_TIMESTAMP return false;
 
@@ -3922,6 +3974,7 @@ rectangle_of :: (menu: *Popup_Menu) -> Rectangle {
 Point_Relative_To :: enum {
     TOP_LEFT;
     MIDDLE_RIGHT;
+    MIDDLE;
 }
 
 draw_simple_text_pane :: (parent_rect: Rectangle, font: *Simp.Dynamic_Font, point: Vector2, relative_to: Point_Relative_To, text: string, text_color: Vector4, background_color: Vector4) {
@@ -3949,6 +4002,9 @@ draw_simple_text_pane :: (parent_rect: Rectangle, font: *Simp.Dynamic_Font, poin
             y_top = bottom(parent_rect) + point.y;
         case .MIDDLE_RIGHT;
             x_left = parent_rect.left + point.x - text_w_max;
+            y_top = bottom(parent_rect) + H / 2 + point.y;
+        case .MIDDLE;
+            x_left = parent_rect.left + point.x - text_w_max / 2;
             y_top = bottom(parent_rect) + H / 2 + point.y;
     }
 
@@ -5382,7 +5438,7 @@ parse_date_timestamp :: (input: string) -> (Calendar_Time, Parse_Date_Time_Resul
 
     // separator
     sep = input[cursor]; cursor += 1;
-    if (inline is_digit(sep)) || (inline is_alpha(sep)) return result, status, tail;
+    if (inline is_digit(sep)) || ((inline is_alpha(sep)) && sep != #char "T") return result, status, tail;
 
     // skip whitespace
     while (cursor < input.count) && (inline is_space(input[cursor])) cursor += 1;
@@ -5581,7 +5637,12 @@ parse_syslog_prefix :: (input: string) -> (info: Syslog_Line_Info, ok: bool, tai
     // month
     {
         // skip non whitespace
-        while (cursor < input.count) && !(inline is_space(input[cursor])) cursor += 1;
+        while cursor < input.count {
+            c := input[cursor];
+            if inline is_space(c) break;
+            if !inline is_alpha(c) return result, false, tail;
+            cursor += 1;
+        }
         tail = advance(input, cursor);
 
         if cursor == month_start return result, false, tail;
