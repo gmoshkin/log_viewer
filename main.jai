@@ -525,6 +525,13 @@ update_and_draw_frame :: () -> bool {
             // TODO: remove existing anchors
             request_load_text_buffer_data(*the_text_buffer, from_clipboard=true);
             Profile();
+        } else if it.key_pressed && it.ctrl_pressed && it.key_code == #char "Z" {
+            if it.shift_pressed
+                request_buffer_text_redo(*the_text_buffer);
+            else
+                request_buffer_text_undo(*the_text_buffer);
+        } else if it.key_pressed && it.ctrl_pressed && it.key_code == #char "Y" {
+            request_buffer_text_redo(*the_text_buffer);
         }
     }
 
@@ -633,9 +640,10 @@ update_and_draw_frame :: () -> bool {
 
     Simp.set_shader_for_color();
 
+    can_read_buffer := safe_to_read_buffer_data(*the_text_buffer);
+
     // draw text pane
-    if !the_text_buffer.parsing_in_progress
-    {
+    if can_read_buffer {
         profile_t0 = seconds_since_init();
 
         handle_mouse: Mouse_Interaction;
@@ -655,8 +663,7 @@ update_and_draw_frame :: () -> bool {
     }
 
     // draw progress bar
-    if the_text_buffer.parsing_in_progress
-    {
+    if !can_read_buffer {
         font := ui_font;
 
         rect: Rectangle;
@@ -715,7 +722,7 @@ update_and_draw_frame :: () -> bool {
     //
     // draw line anchors
     //
-    if !the_text_buffer.parsing_in_progress
+    if safe_to_read_buffer_data(*the_text_buffer)
     {
         rect := *left_column_rect;
         x_tweak := -3;
@@ -784,7 +791,7 @@ update_and_draw_frame :: () -> bool {
     scroll_bar_rectangles_drawn = 0;
     Profile("draw scroll bar");
     // draw scroll bar
-    if !the_text_buffer.parsing_in_progress
+    if safe_to_read_buffer_data(*the_text_buffer)
     {
         parent_rect := *scroll_bar_rect;
         // draw visible scroll bar slider
@@ -1040,7 +1047,8 @@ jump_destination_row_offset :: inline () -> float64 {
     return n_lines_per_screen / 2.0 - 3;
 }
 
-get_instant_for_line :: (line_index: int) -> Apollo_Time {
+get_instant_for_line :: (_line_index: int) -> Apollo_Time {
+    line_index := clamp(_line_index, 0, the_text_buffer.line_infos.count - 1);
     timestamp := the_text_buffer.line_infos[line_index].timestamp;
     if timestamp.year {
         return calendar_to_apollo(timestamp);
@@ -1076,7 +1084,8 @@ get_instant_for_line :: (line_index: int) -> Apollo_Time {
 }
 
 calculate_last_jump_duration :: () -> float64, bool {
-    if the_text_buffer.parsing_in_progress return -1, false;
+    if !safe_to_read_buffer_data(*the_text_buffer) return -1, false;
+    if !the_text_buffer.line_infos return -1, false;
 
     old_index := cast(int, old_target_scroll_rows + jump_destination_row_offset());
     old_instant := get_instant_for_line(old_index);
@@ -1654,6 +1663,10 @@ Log_Text_Buffer :: struct {
 
     skipped_based_on_timestamp: int;
 
+    // undo history
+    all_text_history: [..] string;
+    current_position_in_history := 0;
+
     // async
     current_version: u64;
     request: Parsing_Request;
@@ -1710,6 +1723,56 @@ get_line :: (using buffer: *Log_Text_Buffer, line_index: int) -> string {
 // buffer mutations
 //
 
+update_buffer_text :: (buffer: *Log_Text_Buffer, _new_data: string) {
+    if buffer.current_position_in_history < buffer.all_text_history.count - 1 {
+        // Drop any buffers in redo queue
+        for buffer.current_position_in_history + 1..buffer.all_text_history.count - 1 {
+            free(buffer.all_text_history[it]);
+        }
+        buffer.all_text_history.count = buffer.current_position_in_history + 1;
+    }
+
+    new_data := _new_data;
+    if contains(new_data, #char "\r") {
+        // FIXME could also replace this in place...
+        t := replace(new_data, "\r\n", "\n");
+        free(new_data);
+        new_data = t;
+        replace_in_place(new_data, #char "\r", #char "\n");
+    }
+
+    array_add(*buffer.all_text_history, new_data);
+    buffer.current_position_in_history = buffer.all_text_history.count - 1;
+    buffer.all_text = buffer.all_text_history[buffer.current_position_in_history];
+}
+
+do_undo_or_redo :: (buffer: *Log_Text_Buffer, type: Parsing_Request.Type) {
+    assert(type == .UNDO || type == .REDO, "%", type);
+
+    changed := false;
+
+    if type == .UNDO && buffer.current_position_in_history > 0 {
+        buffer.current_position_in_history -= 1;
+        changed = true;
+    } else if type == .REDO && buffer.current_position_in_history < buffer.all_text_history.count - 1 {
+        buffer.current_position_in_history += 1;
+        changed = true;
+    }
+
+    if !changed {
+        buffer.parsing_state = "done";
+        atomic_swap(*buffer.parsing_in_progress, false);
+        return;
+    }
+
+    buffer.all_text = buffer.all_text_history[buffer.current_position_in_history];
+
+    Profile();
+    // @INCOMPLETE skip_until not supported
+    process_text_buffer_data(buffer);
+    Profile("process_text_buffer_data");
+}
+
 load_text_buffer_data :: (buffer: *Log_Text_Buffer, _filenames: [] string = .[], from_clipboard := false, skip_until: Calendar_Time = .{}) {
     mark := get_temporary_storage_mark();
     defer set_temporary_storage_mark(mark);
@@ -1734,8 +1797,7 @@ load_text_buffer_data :: (buffer: *Log_Text_Buffer, _filenames: [] string = .[],
         new_data = load_data_from_files(buffer, filenames, skip_until);
     }
 
-    free(buffer.all_text);
-    buffer.all_text = new_data;
+    update_buffer_text(buffer, new_data);
 
     Profile();
     process_text_buffer_data(buffer, skip_until);
@@ -1885,14 +1947,6 @@ process_text_buffer_data :: (using buffer: *Log_Text_Buffer, skip_until: Calenda
 
     buffer.parsing_state = "preprocessing";
 
-    if contains(all_text, #char "\r") {
-        // FIXME could also replace this in place...
-        new_data := replace(all_text, "\r\n", "\n");
-        free(all_text);
-        all_text = new_data;
-        replace_in_place(all_text, #char "\r", #char "\n");
-    }
-
     reset_text_buffer(buffer);
 
     buffer.parsing_state = "parsing logs";
@@ -1998,8 +2052,8 @@ process_text_buffer_data :: (using buffer: *Log_Text_Buffer, skip_until: Calenda
         update_search_results(buffer, search_results.search_string);
     }
 
-    buffer.parsing_in_progress = false;
     buffer.parsing_state = "done";
+    atomic_swap(*buffer.parsing_in_progress, false);
 }
 
 remove_line_range :: (using buffer: *Log_Text_Buffer, first_line: s64, last_line: s64) {
@@ -2029,10 +2083,12 @@ remove_line_range :: (using buffer: *Log_Text_Buffer, first_line: s64, last_line
     end := ifx last_line >= line_infos.count - 1 then all_text.count
                                                  else line_infos[last_line + 1].line_offset;
 
-    moved := all_text.count - end;
-    removed := end - start;
-    memcpy(all_text.data + start, all_text.data + end, moved);
-    all_text.count -= removed;
+    new_data := alloc_string(start + all_text.count - end);
+
+    memcpy(new_data.data, all_text.data, start);
+    memcpy(new_data.data + start, all_text.data + end, all_text.count - end);
+
+    update_buffer_text(buffer, new_data);
 
     Profile();
     process_text_buffer_data(buffer);
@@ -2047,6 +2103,10 @@ parsing_thread: Thread;
 parsing_cond: Condition_Variable;
 parsing_mutex_for_cond: Mutex;
 
+safe_to_read_buffer_data :: (buffer: *Log_Text_Buffer) -> bool {
+    return !buffer.parsing_in_progress && buffer.request.version == buffer.current_version;
+}
+
 start_parsing_thread :: (buffer: *Log_Text_Buffer) {
     init(*parsing_mutex_for_cond, "mutex_for_waker");
     init(*parsing_cond, "waker");
@@ -2059,7 +2119,9 @@ start_parsing_thread :: (buffer: *Log_Text_Buffer) {
 
 Parsing_Request :: struct {
     version: u64;
-    type: enum { LOAD_FILE; LOAD_CLIPBOARD; REMOVE_LINE_RANGE; };
+
+    Type :: enum { LOAD_FILE; LOAD_CLIPBOARD; REMOVE_LINE_RANGE; UNDO; REDO; };
+    type: Type;
 
     filenames: [..] string;       // for .LOAD_FILE
     remove_line_first: s64; // for .REMOVE_LINE_RANGE
@@ -2108,7 +2170,7 @@ parsing_thread_proc :: (thread: *Thread) -> s64 {
 
         log("parsing request: %", request);
 
-        buffer.parsing_in_progress = true;
+        atomic_swap(*buffer.parsing_in_progress, true);
         buffer.parsing_cursor = 0;
         buffer.current_version = request.version;
 
@@ -2118,6 +2180,10 @@ parsing_thread_proc :: (thread: *Thread) -> s64 {
             load_text_buffer_data(buffer, request.filenames, request.type == .LOAD_CLIPBOARD, request.skip_until);
         case .REMOVE_LINE_RANGE;
             remove_line_range(buffer, request.remove_line_first, request.remove_line_last);
+
+        case .UNDO; #through;
+        case .REDO;
+            do_undo_or_redo(buffer, request.type);
         }
 
         reset_temporary_storage();
@@ -2148,6 +2214,30 @@ request_remove_line_range :: (using buffer: *Log_Text_Buffer, first_line: s64, l
     buffer.request.type = .REMOVE_LINE_RANGE;
     buffer.request.remove_line_first = first_line;
     buffer.request.remove_line_last = last_line;
+
+    wake(*parsing_cond);
+}
+
+request_buffer_text_undo :: (using buffer: *Log_Text_Buffer) {
+    goto_definition_helper :: do_undo_or_redo;
+
+    lock(*buffer.request.mutex);
+    defer unlock(*buffer.request.mutex);
+
+    buffer.request.version += 1;
+    buffer.request.type = .UNDO;
+
+    wake(*parsing_cond);
+}
+
+request_buffer_text_redo :: (using buffer: *Log_Text_Buffer) {
+    goto_definition_helper :: do_undo_or_redo;
+
+    lock(*buffer.request.mutex);
+    defer unlock(*buffer.request.mutex);
+
+    buffer.request.version += 1;
+    buffer.request.type = .REDO;
 
     wake(*parsing_cond);
 }
@@ -6464,3 +6554,4 @@ Default_Allocator :: #import "Default_Allocator";
 #import "Compiler";
 #import "Thread";
 Sort :: #import "Sort";
+#import "Atomics";
