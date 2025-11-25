@@ -68,6 +68,13 @@ main :: () {
         }
     }
 
+    #if OS == .LINUX {
+        #import "POSIX";
+        if !getenv("DISPLAY") {
+            setenv("DISPLAY", ":0", 0);
+        }
+    }
+
     window = create_window(xx window_size.x, xx window_size.y, EXE_NAME,
                            background_color_rgb = .[.1, .1, .1],
                            wanted_msaa = WANTED_MSAA);
