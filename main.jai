@@ -3830,7 +3830,7 @@ anchor_button_popup_menu_callback :: (menu: *Popup_Menu, event: Popup_Menu.Event
                 source_id := the_text_buffer.line_infos[anchor.line_index].source_id;
                 anchor.color = get_log_source_color(source_id);
                 anchor.flags |= .TEXT_VISIBLE;
-                x := left(scroll_bar_rect) - 16.0;
+                x := left(scroll_bar_rect) - 26.0;
                 total_line_count := the_text_buffer.line_infos.count;
                 dy := height(scroll_bar_rect) / cast(float) total_line_count;
                 y := top(scroll_bar_rect) - data.line_index * dy - calculate_height(*the_popup_text_input) / 2.0;
@@ -4197,7 +4197,7 @@ Popup_Text_Input :: struct {
     minimum_width: float;
     height: float;
     direction: Adjust_Direction;
-    flags: enum_flags { OPEN; };
+    flags: enum_flags { OPEN; RESIZABLE; };
 
     border_width :: 1.0;
 
@@ -4218,6 +4218,10 @@ rectangle_of :: (using state: *Popup_Text_Input) -> Rectangle {
     rect: Rectangle;
     rect.left = xx position.x;
     rect.width = xx minimum_width;
+    if flags & .RESIZABLE {
+        text_width := Simp.prepare_text(ui_font.regular, xx text_input.buffer);
+        rect.width = max(rect.width, xx text_width);
+    }
     rect.top = xx (position.y + height);
     rect.height = xx height;
     if direction == .LEFT then rect.left -= rect.width;
@@ -4243,6 +4247,7 @@ open_the_popup_text_input :: (at: Vector2, direction: Adjust_Direction, callback
     state.direction = direction;
     state.position = at;
     state.flags |= .OPEN;
+    state.flags |= .RESIZABLE;
 
     return state;
 }
