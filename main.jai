@@ -2536,6 +2536,8 @@ parse_log_line :: (buffer: *Log_Text_Buffer, line: string, info: *Log_Line_Info,
             source_id := add_source(*buffer.all_log_sources, source);
             info.source_start = xx source_start;
             info.source_id = source_id;
+
+            info.message_start = xx cursor;
         }
 
         // TODO: parse the json log format
