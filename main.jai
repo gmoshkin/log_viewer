@@ -125,11 +125,21 @@ main :: () {
 
     should_quit := false;
     while !should_quit {
+        t0 := seconds_since_init();
+
+        Profile();
         should_quit = update_and_draw_frame();
 
         reset_temporary_storage();
 
-        sleep_milliseconds(xx (1000.0 / 60.0));
+        frame_budget := 1.0 / 60;
+        left_to_sleep := frame_budget - (seconds_since_init() - t0);
+        timeout := max(left_to_sleep, 0.001);
+        if search_results.flags & .NOT_FINISHED {
+            update_search_results(timeout=max(timeout / 2, 0.001));
+        }
+
+        sleep_milliseconds(xx (1000 * timeout));
     }
 }
 
@@ -632,6 +642,10 @@ update_and_draw_frame :: () -> bool {
         request_redraw(tprint("%", the_text_buffer.request.type));
     }
 
+    if search_results.flags & .NOT_FINISHED {
+        request_redraw("text search not finished");
+    }
+
     // if !Input.input_application_has_focus return should_quit;
     if !redraw_needed return should_quit;
     // One last redraw to update the redraw reason
@@ -878,16 +892,16 @@ update_and_draw_frame :: () -> bool {
             mouse_in_rect := mouse - .{xx scroll_bar_rect.left, xx bottom(scroll_bar_rect)};
             search_match_index := -1;
             if the_text_search_ui.flags & .OPEN
-                search_match_index = do_scroll_bar_anchors(scroll_bar_rect, search_results.matches, search_match_color, .DRAW, mouse_in_rect);
-            // explicit anchors have higher priority
-            explicit_anchor_index := do_scroll_bar_anchors(scroll_bar_rect, explicit_anchors, anchor_button_active_color, .DRAW, mouse_in_rect, t=15);
+                do_scroll_bar_anchors(scroll_bar_rect, search_results.matches, search_match_color, .DRAW, mouse_in_rect);
+            do_scroll_bar_anchors(scroll_bar_rect, explicit_anchors, anchor_button_active_color, .DRAW, mouse_in_rect, t=15);
 
             if mouse_focus == .SCROLL_BAR_ANCHOR {
-                if explicit_anchor_index != -1 {
-                    anchor := *explicit_anchors[explicit_anchor_index];
+                if #complete hovered_scroll_bar_anchor_kind == {
+                case .EXPLICIT;
+                    anchor := *explicit_anchors[hovered_scroll_bar_anchor_index];
                     draw_single_scroll_bar_anchor(scroll_bar_rect, anchor.line_index, anchor.color, hover=true, t=15);
-                } else if search_match_index != -1 {
-                    match := search_results.matches[search_match_index];
+                case .SEARCH_MATCH;
+                    match := search_results.matches[hovered_scroll_bar_anchor_index];
                     color := get_log_source_color(match.source_id);
                     draw_single_scroll_bar_anchor(scroll_bar_rect, match.line_index, color, hover=true);
                 }
@@ -1031,8 +1045,9 @@ update_and_draw_frame :: () -> bool {
     // Simp.clear_render_target(1, 0, 0, 1);
     // Simp.clear_scissor();
 
-    Simp.swap_buffers(window);
     Profile();
+    Simp.swap_buffers(window);
+    Profile("swap_buffers");
     frame_counter += 1;
 
     return should_quit;
@@ -1113,6 +1128,10 @@ calculate_last_jump_duration :: () -> float64, bool {
 
 // I hate this procedure
 do_scroll_bar_anchors :: (parent_rect: Rectangle, anchors: [] $T, color: Vector4, $mode: enum { DRAW; GET_HOVER; }, target_in_rect: Vector2, $$t := 10.0) -> (index: s64) {
+    if mode == .DRAW && anchors.count > 1000 {
+        return draw_scroll_bar_anchors_faster(parent_rect, anchors, color, target_in_rect, t);
+    }
+
     target := target_in_rect;
     hover_color := scroll_bar_anchor_hover_color;
     color_ := color;
@@ -1157,7 +1176,57 @@ do_scroll_bar_anchors :: (parent_rect: Rectangle, anchors: [] $T, color: Vector4
     return hover_indexes[hover_indexes.count / 2];
 }
 
-draw_single_scroll_bar_anchor :: (parent_rect: Rectangle, line_index: int, color: Vector4, $$t := 10.0, hover: bool) {
+draw_scroll_bar_anchors_faster :: (parent_rect: Rectangle, anchors: [] $T, color: Vector4, target_in_rect: Vector2, $$t := 10.0) -> (index: s64) {
+    x, effective_h, w, h := scroll_bar_anchor_parameters(parent_rect, the_text_buffer.line_infos.count);
+
+    target := target_in_rect;
+
+    next_anchor_i := 0;
+    lines_per_pixel := the_text_buffer.line_infos.count / parent_rect.height.(float64);
+    first_line := 0;
+
+    for pixel_y: 0..parent_rect.height-1 {
+        if next_anchor_i >= anchors.count break;
+        assert(anchors[next_anchor_i].line_index >= first_line);
+
+        last_line := (first_line + lines_per_pixel).(int);
+        defer first_line = last_line + 1;
+
+        if anchors[next_anchor_i].line_index > last_line continue;
+
+        first_anchor_i := next_anchor_i;
+
+        while true {
+            next_anchor_i += 1;
+            if next_anchor_i >= anchors.count break;
+            if anchors[next_anchor_i].line_index > last_line break;
+        }
+
+        n_anchors := next_anchor_i - first_anchor_i;
+
+        y := parent_rect.top - pixel_y - 1 - (h / 2);
+
+        q := 1.0 / n_anchors;
+        color: Vector4;
+        for array_view(anchors, first_anchor_i, n_anchors) {
+            #if T == Search_Match_Info c := get_log_source_color(it.source_id);
+            #if T == Anchor            c := it.color;
+            color += c * q;
+
+            #if T == Anchor if it.flags & .TEXT_VISIBLE {
+                label_right := x - t;
+                draw_simple_text_pane(window_rect, ui_font.regular, .{label_right, y}, .MIDDLE_RIGHT, it.text, ui_element_text_color, ui_element_background_color);
+            }
+        }
+
+        draw_scroll_bar_anchor(x, y, w, h, t, color, hover=false);
+    }
+
+    // Hover index not supported
+    return -1;
+}
+
+draw_single_scroll_bar_anchor :: (parent_rect: Rectangle, line_index: int, color: Vector4, $$t := 10.0, $$hover: bool) {
     x, effective_h, w, h := scroll_bar_anchor_parameters(parent_rect, the_text_buffer.line_infos.count);
     y := parent_rect.top - (line_index + 1) * effective_h;
 
@@ -1173,7 +1242,7 @@ scroll_bar_anchor_parameters :: (parent_rect: Rectangle, max_count: int) -> (x: 
     return x, effective_h, w, h;
 }
 
-draw_scroll_bar_anchor :: (x: float, y: float, w: float, h: float, $$t: float, color: Vector4, hover: bool) {
+draw_scroll_bar_anchor :: (x: float, y: float, w: float, h: float, $$t: float, color: Vector4, $$hover: bool) {
     hover_color := scroll_bar_anchor_hover_color;
 
 
@@ -2060,7 +2129,9 @@ process_text_buffer_data :: (using buffer: *Log_Text_Buffer, skip_until: Calenda
 
     if search_results.matches {
         buffer.parsing_state = "updating search matches";
-        update_search_results(buffer, search_results.search_string);
+        reset_search_results(buffer, search_results.search_string);
+        update_search_results(need_completions=false);
+        Profile("update_search_results");
     }
 
     buffer.parsing_state = "done";
@@ -3023,7 +3094,9 @@ log_line_popup_menu_callback :: (menu: *Popup_Menu, event: Popup_Menu.Event) {
                 text_input_append_text(text_input, value);
             }
 
-            new_completions := update_search_results(buffer, xx text_input.buffer);
+            reset_search_results(buffer, xx text_input.buffer);
+            new_completions := update_search_results(need_completions=true);
+            Profile("update_search_results");
             save_completions(*the_text_search_ui, new_completions);
             open_text_search_ui();
         }
@@ -3052,7 +3125,9 @@ Search_Results :: struct {
 
     text_buffer: *Log_Text_Buffer;
 
-    flags: enum_flags { CASE_INSENSITIVE; STRUCTURED_QUERY; }
+    line_info_cursor: int;
+
+    flags: enum_flags { CASE_INSENSITIVE; STRUCTURED_QUERY; NOT_FINISHED; }
 }
 MAX_SEARCH_STRING_LENGTH :: 255;
 
@@ -3067,7 +3142,7 @@ search_match_color :: #run hex_color("f5a511");
 
 search_results: Search_Results;
 
-update_search_results :: (using buffer: *Log_Text_Buffer, _search_string: string) -> completions: Completions {
+reset_search_results :: (using buffer: *Log_Text_Buffer, _search_string: string) {
     search_string := _search_string;
     if search_string.count >= search_results.search_string_storage.count {
         search_string.count = search_results.search_string_storage.count;
@@ -3077,34 +3152,72 @@ update_search_results :: (using buffer: *Log_Text_Buffer, _search_string: string
     search_results.search_string_storage[search_string.count] = 0; // XXX I don't really need this...
     search_results.search_string.data = search_results.search_string_storage.data;
     search_results.search_string.count = search_string.count;
-    search_results.flags = 0;
 
     search_results.text_buffer = buffer;
     array_reset_keeping_memory(*search_results.matches);
     search_results.matches.allocator = context.default_allocator;
-    search_results.flags = 0;
+    search_results.flags = .NOT_FINISHED;
+    search_results.line_info_cursor = 0;
+}
 
-    if !search_string return .{};
+update_search_results :: ($need_completions: bool = false, timeout: float64 = 0.008) -> completions: Completions {
+    if !search_results.search_string {
+        search_results.flags &= ~.NOT_FINISHED;
+        return .{};
+    }
 
-    queries, do_query, completions := parse_search_string(search_string, buffer);
+    buffer := search_results.text_buffer;
 
-    search_string_lowercase := to_lower_copy(search_string,, temp);
-    for search_string if is_alpha(it) { search_results.flags |= .CASE_INSENSITIVE; break; }
+    Profile();
+    t0 := seconds_since_init();
+    queries, do_query, completions := parse_search_string(search_results.search_string, buffer, need_completions);
+    log("parse_search_string took %", fmt(seconds_since_init() - t0, 6));
+    Profile("parse_search_string");
 
+    search_string_lowercase := to_lower_copy(search_results.search_string,, temp);
+    for search_results.search_string if is_alpha(it) { search_results.flags |= .CASE_INSENSITIVE; break; }
+
+    t0 = seconds_since_init();
     if do_query {
         search_results.flags |= .STRUCTURED_QUERY;
-        do_query_search(buffer, queries, *search_results.matches);
+        do_query_search(buffer, *search_results, queries, timeout);
+        log("do_query_search took %", fmt(seconds_since_init() - t0, 6));
+        Profile("do_query_search");
     } else {
-        do_text_search(buffer, search_string_lowercase, *search_results.matches, xx (search_results.flags & .CASE_INSENSITIVE));
+        do_text_search(buffer, *search_results, search_string_lowercase, timeout);
+        log("do_text_search took %", fmt(seconds_since_init() - t0, 6));
+        Profile("do_text_search");
     }
 
     return completions;
 }
 
-do_text_search :: (buffer: *Log_Text_Buffer, search_string_lowercase: string, matches: *[..] Search_Match_Info, $$case_insensitive: bool) {
+Search_Running_Too_Long :: (timeout: float64) -> bool #expand {
+    `check += 1;
+    if `check == 512 {
+        `check = 0;
+        if seconds_since_init() - `t0 > 0.008 {
+            return true;
+        }
+    }
+    return false;
+}
+
+do_text_search :: (buffer: *Log_Text_Buffer, search_results: *Search_Results, search_string_lowercase: string, timeout: float64) {
     next_range_cursor := 0;
 
-    for line_index: 0..buffer.line_infos.count - 1 {
+    case_insensitive := cast(bool, search_results.flags & .CASE_INSENSITIVE);
+
+    t0 := seconds_since_init();
+    line_index := search_results.line_info_cursor;
+    check := 0;
+
+    while line_index < buffer.line_infos.count {
+        if Search_Running_Too_Long(timeout) {
+            search_results.line_info_cursor = line_index;
+            return;
+        }
+        defer line_index += 1;
         line := get_line(buffer, line_index);
         if !line continue;
 
@@ -3124,9 +3237,11 @@ do_text_search :: (buffer: *Log_Text_Buffer, search_string_lowercase: string, ma
 
         if offset >= 0 {
             assert(offset <= S16_MAX, "%", offset);
-            array_add(matches, Search_Match_Info.{xx line_index, xx offset, source_id, xx search_string_lowercase.count});
+            array_add(*search_results.matches, Search_Match_Info.{xx line_index, xx offset, source_id, xx search_string_lowercase.count});
         }
     }
+
+    search_results.flags &= ~.NOT_FINISHED;
 }
 
 Search_Query :: struct {
@@ -3142,9 +3257,20 @@ Search_Query_Leaf :: struct {
     value: string;
 }
 
-do_query_search :: (buffer: *Log_Text_Buffer, queries: Search_Query, matches: *[..] Search_Match_Info) {
+do_query_search :: (buffer: *Log_Text_Buffer, search_results: *Search_Results, queries: Search_Query, timeout: float64) {
     line_matches := resizable_array(Search_Match_Info.[],, temp);
-    for * line_info, line_index: buffer.line_infos {
+
+    t0 := seconds_since_init();
+    line_index := search_results.line_info_cursor;
+    check := 0;
+
+    while line_index < buffer.line_infos.count {
+        if Search_Running_Too_Long(timeout) {
+            search_results.line_info_cursor = line_index;
+            return;
+        }
+        defer line_index += 1;
+        line_info := *buffer.line_infos[line_index];
         source_id := line_info.source_id;
 
         for match_any: queries.match_any {
@@ -3166,12 +3292,14 @@ do_query_search :: (buffer: *Log_Text_Buffer, queries: Search_Query, matches: *[
                 array_add(*line_matches, Search_Match_Info.{xx line_index, xx offset, source_id, count});
             }
 
-            array_add(matches, ..line_matches);
+            array_add(*search_results.matches, ..line_matches);
         }
     }
+
+    search_results.flags &= ~.NOT_FINISHED;
 }
 
-parse_search_string :: (text: string, buffer: *Log_Text_Buffer = null) -> (Search_Query, ok: bool, completions: Completions) {
+parse_search_string :: (text: string, buffer: *Log_Text_Buffer = null, $need_completions := false) -> (Search_Query, ok: bool, completions: Completions) {
     match_any: [..] Search_Query_Match_All;
     match_any.allocator = temp;
     match_all: [..] Search_Query_Leaf;
@@ -3181,7 +3309,7 @@ parse_search_string :: (text: string, buffer: *Log_Text_Buffer = null) -> (Searc
     tail := text;
     tail = inline trim_left(tail);
     while tail {
-        query, ok, completions=, cursor := parse_search_query_leaf(tail, buffer);
+        query, ok, completions=, cursor := parse_search_query_leaf(tail, buffer, need_completions);
         if !ok {
             if match_all array_add(*match_any, .{match_all});
             return .{match_any}, false, completions;
@@ -3206,7 +3334,7 @@ parse_search_string :: (text: string, buffer: *Log_Text_Buffer = null) -> (Searc
 }
 
 // completions and possibly Search_Query_Leaf are allocated on temporary storage
-parse_search_query_leaf :: (text: string, buffer: *Log_Text_Buffer = null) -> (Search_Query_Leaf, ok: bool, completions: Completions, cursor: int) {
+parse_search_query_leaf :: (text: string, buffer: *Log_Text_Buffer = null, $need_completions: bool) -> (Search_Query_Leaf, ok: bool, completions: Completions, cursor: int) {
     cursor := 0;
 
     completions: [..] string;
@@ -3235,13 +3363,15 @@ parse_search_query_leaf :: (text: string, buffer: *Log_Text_Buffer = null) -> (S
             }
         }
 
-        // find completions
-        inline array_reset_keeping_memory(*completions);
-        for buffer.all_words {
-            // TODO to_lower_copy?
-            if !starts_with(it_index, last_word) continue;
+        #if need_completions {
+            // find completions
+            inline array_reset_keeping_memory(*completions);
+            for buffer.all_words {
+                // TODO to_lower_copy?
+                if !starts_with(it_index, last_word) continue;
 
-            array_add(*completions, it_index,, temp);
+                array_add(*completions, it_index,, temp);
+            }
         }
 
         return .{}, false, .{completions, last_word.count}, cursor;
@@ -3266,8 +3396,10 @@ parse_search_query_leaf :: (text: string, buffer: *Log_Text_Buffer = null) -> (S
             break;
         }
 
-        if starts_with(it.name, type_string) {
-            array_add(*completions, it.name);
+        #if need_completions {
+            if starts_with(it.name, type_string) {
+                array_add(*completions, it.name);
+            }
         }
     }
 
@@ -3304,11 +3436,13 @@ parse_search_query_leaf :: (text: string, buffer: *Log_Text_Buffer = null) -> (S
 
         result.value = slice(text, value_start, cursor - value_start);
 
-        array_reset_keeping_memory(*completions);
-        for all_values {
-            if !starts_with(it, result.value) continue;
+        #if need_completions {
+            array_reset_keeping_memory(*completions);
+            for all_values {
+                if !starts_with(it, result.value) continue;
 
-            array_add(*completions, it,, temp);
+                array_add(*completions, it,, temp);
+            }
         }
     }
 
@@ -3603,7 +3737,8 @@ text_search_ui_handle_input_event :: (event: Input.Event) -> handled: bool {
     if !status return false;
 
     if status & .TEXT_CHANGED {
-        new_completions := update_search_results(*the_text_buffer, xx text_input.buffer);
+        reset_search_results(*the_text_buffer, xx text_input.buffer);
+        new_completions := update_search_results(need_completions=true);
         save_completions(*the_text_search_ui, new_completions);
     }
 
