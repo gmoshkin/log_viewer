@@ -27,6 +27,11 @@ build :: () {
         set_optimization(*options, .OPTIMIZED);
     }
 
+    if OS == .WINDOWS {
+        // Disable runtime console
+        options.additional_linker_arguments = .["/SUBSYSTEM:windows", "/ENTRY:mainCRTStartup"];
+    }
+
     set_build_options(options, workspace);
 
     //
@@ -74,7 +79,6 @@ set_icon :: (exe_full_path: string) {
     log("Setting the icon to '%'.\n", icon_file);
 
     #if OS == .WINDOWS {
-        #import "Windows_Resources";
         success := set_icon_by_filename(exe_full_path, icon_file);
         if !success {
             log_error("Failed to set the icon for exe '%' to filename '%'.\n", exe_full_path, icon_file);
@@ -120,3 +124,4 @@ advance :: inline (array: [] $T, offset: s64) -> result: [] T {
 #import "Basic";
 #import "Compiler";
 Check :: #import "Check";
+#if OS == .WINDOWS #import "Windows_Resources";

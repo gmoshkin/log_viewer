@@ -822,6 +822,17 @@ update_and_draw_frame :: () -> bool {
 
             color := get_log_source_color(range.source_id);
 
+            Flush_Skipped_Colors :: (y: float) #expand {
+                average_color := Vector4.{};
+                q := 1.0 / skipped_colors.count;
+                for skipped_colors  average_color += it * q;
+
+                draw_axis_aligned_rectangle(xx x, y, xx w, skip_start - y, average_color);
+                scroll_bar_rectangles_drawn += 1;
+
+                skipped_colors.count = 0;
+            }
+
             // not going to be visible
             if y_top - y_bottom < .5
             {
@@ -831,18 +842,11 @@ update_and_draw_frame :: () -> bool {
                 array_add(*skipped_colors, color);
 
                 if skip_start - y_bottom >= 1 {
-                    color = .{};
-                    q := 1.0 / skipped_colors.count;
-                    for skipped_colors {
-                        color += it * q;
-                    }
-
-                    draw_axis_aligned_rectangle(xx x, y_bottom, xx w, skip_start - y_bottom, color);
-                    scroll_bar_rectangles_drawn += 1;
-
-                    skipped_colors.count = 0;
+                    Flush_Skipped_Colors(y_bottom);
                 }
                 continue;
+            } else if skipped_colors {
+                Flush_Skipped_Colors(y_top);
             }
 
             draw_axis_aligned_rectangle(xx x, y_bottom, xx w, y_top - y_bottom, color);
@@ -2452,6 +2456,7 @@ parse_log_line :: (buffer: *Log_Text_Buffer, line: string, info: *Log_Line_Info,
     // optional bullshit gitlab ci log prefix
     //
     timestamp, status, tail := parse_date_timestamp(advance(line, cursor));
+    Patch_The_Fucking_60_Second_Timestamp(*timestamp);
     if status == .FULL
         && tail.count >= 8
         && tail[3] == #char "Z"
@@ -2524,6 +2529,7 @@ parse_log_line :: (buffer: *Log_Text_Buffer, line: string, info: *Log_Line_Info,
 
     timestamp_start := cursor;
     timestamp, status, tail = parse_date_timestamp(advance(line, cursor));
+    Patch_The_Fucking_60_Second_Timestamp(*timestamp);
     if status != .FULL {
         #if mode == .ONLY_TIMESTAMP return false;
 
@@ -5612,6 +5618,15 @@ parse_date_timestamp :: (input: string) -> (Calendar_Time, Parse_Date_Time_Resul
     tail = advance(input, cursor);
 
     return result, status, tail;
+}
+
+Patch_The_Fucking_60_Second_Timestamp :: inline (timestamp: *Calendar_Time) {
+    // Yeah tarantool will sometimes print out 13:31:60.000, and then windows
+    // will fail to convert that to a time value, so let's fucking deal with it I guess
+    if timestamp.second == 60 {
+        timestamp.second = 59;
+        timestamp.millisecond = 999;
+    }
 }
 
 test_parse_date_timestamp :: () {
