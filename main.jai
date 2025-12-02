@@ -210,6 +210,7 @@ scroll_bar_rectangles_drawn: int;
 
 hovered_scroll_bar_anchor_kind: enum { EXPLICIT; SEARCH_MATCH; };
 hovered_scroll_bar_anchor_index: s64 = -1;
+scroll_bar_anchors_to_render: [..] struct { y: float; color: Vector4; };
 
 color_red :: #run hex_color("db0011");
 color_green :: #run hex_color("00c52c");
@@ -1128,7 +1129,7 @@ calculate_last_jump_duration :: () -> float64, bool {
 
 // I hate this procedure
 do_scroll_bar_anchors :: (parent_rect: Rectangle, anchors: [] $T, color: Vector4, $mode: enum { DRAW; GET_HOVER; }, target_in_rect: Vector2, $$t := 10.0) -> (index: s64) {
-    if mode == .DRAW && anchors.count > 1000 {
+    #if T == Search_Match_Info if mode == .DRAW && anchors.count > 1000 {
         return draw_scroll_bar_anchors_faster(parent_rect, anchors, color, target_in_rect, t);
     }
 
@@ -1176,7 +1177,7 @@ do_scroll_bar_anchors :: (parent_rect: Rectangle, anchors: [] $T, color: Vector4
     return hover_indexes[hover_indexes.count / 2];
 }
 
-draw_scroll_bar_anchors_faster :: (parent_rect: Rectangle, anchors: [] $T, color: Vector4, target_in_rect: Vector2, $$t := 10.0) -> (index: s64) {
+draw_scroll_bar_anchors_faster :: (parent_rect: Rectangle, anchors: [] Search_Match_Info, color: Vector4, target_in_rect: Vector2, $$t := 10.0) -> (index: s64) {
     x, effective_h, w, h := scroll_bar_anchor_parameters(parent_rect, the_text_buffer.line_infos.count);
 
     target := target_in_rect;
@@ -1185,41 +1186,40 @@ draw_scroll_bar_anchors_faster :: (parent_rect: Rectangle, anchors: [] $T, color
     lines_per_pixel := the_text_buffer.line_infos.count / parent_rect.height.(float64);
     first_line := 0;
 
-    for pixel_y: 0..parent_rect.height-1 {
-        if next_anchor_i >= anchors.count break;
-        assert(anchors[next_anchor_i].line_index >= first_line);
-
-        last_line := (first_line + lines_per_pixel).(int);
-        defer first_line = last_line + 1;
-
-        if anchors[next_anchor_i].line_index > last_line continue;
-
-        first_anchor_i := next_anchor_i;
-
-        while true {
-            next_anchor_i += 1;
+    if !scroll_bar_anchors_to_render {
+        for pixel_y: 0..parent_rect.height-1 {
             if next_anchor_i >= anchors.count break;
-            if anchors[next_anchor_i].line_index > last_line break;
-        }
+            assert(anchors[next_anchor_i].line_index >= first_line);
 
-        n_anchors := next_anchor_i - first_anchor_i;
+            last_line := (first_line + lines_per_pixel).(int);
+            defer first_line = last_line + 1;
 
-        y := parent_rect.top - pixel_y - 1 - (h / 2);
+            if anchors[next_anchor_i].line_index > last_line continue;
 
-        q := 1.0 / n_anchors;
-        color: Vector4;
-        for array_view(anchors, first_anchor_i, n_anchors) {
-            #if T == Search_Match_Info c := get_log_source_color(it.source_id);
-            #if T == Anchor            c := it.color;
-            color += c * q;
+            first_anchor_i := next_anchor_i;
 
-            #if T == Anchor if it.flags & .TEXT_VISIBLE {
-                label_right := x - t;
-                draw_simple_text_pane(window_rect, ui_font.regular, .{label_right, y}, .MIDDLE_RIGHT, it.text, ui_element_text_color, ui_element_background_color);
+            while true {
+                next_anchor_i += 1;
+                if next_anchor_i >= anchors.count break;
+                if anchors[next_anchor_i].line_index > last_line break;
             }
-        }
 
-        draw_scroll_bar_anchor(x, y, w, h, t, color, hover=false);
+            n_anchors := next_anchor_i - first_anchor_i;
+
+            q := 1.0 / n_anchors;
+            color: Vector4;
+            for array_view(anchors, first_anchor_i, n_anchors) {
+                c := get_log_source_color(it.source_id);
+                color += c * q;
+            }
+
+            y := parent_rect.top - pixel_y - 1 - (h / 2);
+            array_add(*scroll_bar_anchors_to_render, .{y, color});
+        }
+    }
+
+    for scroll_bar_anchors_to_render {
+        draw_scroll_bar_anchor(x, it.y, w, h, t, it.color, hover=false);
     }
 
     // Hover index not supported
@@ -3158,6 +3158,8 @@ reset_search_results :: (using buffer: *Log_Text_Buffer, _search_string: string)
     search_results.matches.allocator = context.default_allocator;
     search_results.flags = .NOT_FINISHED;
     search_results.line_info_cursor = 0;
+
+    scroll_bar_anchors_to_render.count = 0;
 }
 
 update_search_results :: ($need_completions: bool = false, timeout: float64 = 0.008) -> completions: Completions {
@@ -3177,6 +3179,8 @@ update_search_results :: ($need_completions: bool = false, timeout: float64 = 0.
     search_string_lowercase := to_lower_copy(search_results.search_string,, temp);
     for search_results.search_string if is_alpha(it) { search_results.flags |= .CASE_INSENSITIVE; break; }
 
+    old_count := search_results.matches.count;
+
     t0 = seconds_since_init();
     if do_query {
         search_results.flags |= .STRUCTURED_QUERY;
@@ -3187,6 +3191,10 @@ update_search_results :: ($need_completions: bool = false, timeout: float64 = 0.
         do_text_search(buffer, *search_results, search_string_lowercase, timeout);
         log("do_text_search took %", fmt(seconds_since_init() - t0, 6));
         Profile("do_text_search");
+    }
+
+    if old_count != search_results.matches.count {
+        scroll_bar_anchors_to_render.count = 0;
     }
 
     return completions;
