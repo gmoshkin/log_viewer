@@ -3148,7 +3148,8 @@ do_query_search :: (buffer: *Log_Text_Buffer, queries: Search_Query, matches: *[
                 if !info_contains(line_info, query.type) continue match_any;
 
                 value, offset, count := inline lookup_log_info(buffer, line_index, query.type);
-                assert(xx value);
+                if !value continue match_any;
+
                 if query.value != "" {
                     index := inline find_index_from_left(value, query.value);
                     if index == -1 continue match_any;
