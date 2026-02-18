@@ -194,9 +194,11 @@ ui_font := My_Dynamic_Font.{
 };
 
 text_pane_rect: Rectangle;
+status_bar_rect: Rectangle;
 left_column_rect: Rectangle;
 
 window_bg_color :: #run hex_color("191919");
+status_bar_bg_color :: window_bg_color;
 
 draggin_scroll_bar := false;
 scroll_bar_rect: Rectangle;
@@ -286,13 +288,22 @@ update_and_draw_frame :: () -> bool {
     window_rect.width = xx window_size.x;
     window_rect.height = xx window_size.y;
 
+    // status bar info
+    {
+        using status_bar_rect;
+        left   = absolute_left;
+        width  = absolute_right - absolute_left;
+        height = 20;
+        top    = absolute_bottom + height;
+    }
+
     // scroll bar info
     {
         using scroll_bar_rect;
         width  = 16;
         left   = absolute_right - width;
         top    = absolute_top;
-        height = xx window_size.y;
+        height = xx (window_size.y - status_bar_rect.height);
     }
 
     //
@@ -304,7 +315,7 @@ update_and_draw_frame :: () -> bool {
         left = max(left, xx (main_font.line_height * 3));
         top    = absolute_top;
         width  = scroll_bar_rect.left - left;
-        height = xx window_size.y;
+        height = scroll_bar_rect.height;
     }
     total_line_count := the_text_buffer.line_infos.count;
     text_pane_row_count := text_pane_rect.height / main_font.line_height;
@@ -508,6 +519,11 @@ update_and_draw_frame :: () -> bool {
         else if it.key_pressed && it.key_code == xx #char "M" && it.ctrl_pressed {
             jump_to_next_explicit_anchor(forwards=!it.shift_pressed);
             request_redraw("jump to next anchor");
+        }
+
+        else if it.key_pressed && it.key_code == xx #char "G" && it.ctrl_pressed {
+            jump_to_next_search_match(forwards=!it.shift_pressed);
+            request_redraw("jump to next search match");
         }
 
         else if it.key_pressed && it.key_code == .PAGE_UP {
@@ -894,8 +910,7 @@ update_and_draw_frame :: () -> bool {
         {
             mouse_in_rect := mouse - .{xx scroll_bar_rect.left, xx bottom(scroll_bar_rect)};
             search_match_index := -1;
-            if the_text_search_ui.flags & .OPEN
-                do_scroll_bar_anchors(scroll_bar_rect, search_results.matches, search_match_color, .DRAW, mouse_in_rect);
+            do_scroll_bar_anchors(scroll_bar_rect, search_results.matches, search_match_color, .DRAW, mouse_in_rect);
             do_scroll_bar_anchors(scroll_bar_rect, explicit_anchors, anchor_button_active_color, .DRAW, mouse_in_rect, t=15);
 
             if mouse_focus == .SCROLL_BAR_ANCHOR {
@@ -979,38 +994,61 @@ update_and_draw_frame :: () -> bool {
         y := window_rect.top - 4.0;
 
         builder: String_Builder; builder.allocator = temp;
-        print(*builder, "scroll: %, %\n", fmt(scroll_columns, 1), fmt(scroll_rows, 1));
-
-        jump_duration, ok := calculate_last_jump_duration();
-        print(*builder, "jump time: ");
-        if ok {
-            print_pretty_duration(*builder, jump_duration);
-        } else {
-            print(*builder, "?");
-        }
-        append(*builder, "\n");
-
-        // print(*builder, "mouse focus: %\n", mouse_focus);
-        if the_text_search_ui.flags & .OPEN print(*builder, "search matches: %\n", search_results.matches.count);
-        if hovered_scroll_bar_anchor_index != -1 then print(*builder, "% %\n", hovered_scroll_bar_anchor_kind, hovered_scroll_bar_anchor_index);
-        // if quicksort_duration then print(*builder, "quicksort_duration: %\n", quicksort_duration);
-        if scroll_bar_rectangles_drawn then print(*builder, "scrollbar drawn quads: %\n", scroll_bar_rectangles_drawn);
-
-
-        // if the_text_search_ui.completions.values {
-        //     print(*builder, "matched prefix: %\n", the_text_search_ui.completions.matched_prefix_length);
-        // }
-        for array_view(the_text_search_ui.completions.values, 0, 16) {
-            print(*builder, "%\n", it);
-        }
-        if the_text_search_ui.completions.values.count > 16 {
-            print(*builder, "...\n");
-        }
-
-        for redraw_reasons print(*builder, "%\n", it);
 
         pane_text := builder_to_string(*builder,, temp);
         draw_simple_text_pane(rect, font, .{x, y}, .TOP_LEFT, pane_text, hex_color("ffffff"), hex_color("181818"));
+    }
+
+    // status bar
+    {
+        rect := window_rect;
+        font := ui_font.regular;
+
+        draw_axis_aligned_rectangle(status_bar_rect, status_bar_bg_color);
+
+        y := cast(float) bottom(status_bar_rect);
+        W := width(status_bar_rect);
+        H := height(status_bar_rect);
+
+        // status bar right
+        {
+            builder: String_Builder; builder.allocator = temp;
+
+            for redraw_reasons print(*builder, "% ", it);
+            if redraw_reasons print(*builder, " |  ");
+
+            if hovered_scroll_bar_anchor_index != -1 then print(*builder, "% %    ", hovered_scroll_bar_anchor_kind, hovered_scroll_bar_anchor_index);
+            // if quicksort_duration then print(*builder, "quicksort_duration: %\n", quicksort_duration);
+            if scroll_bar_rectangles_drawn then print(*builder, "scrollbar quads: %    ", scroll_bar_rectangles_drawn);
+
+
+            if search_results.matches print(*builder, "search matches: %    ", search_results.matches.count);
+
+            pane_text := trim(builder_to_string(*builder,, temp));
+
+            x := cast(float) right(status_bar_rect);
+            draw_simple_text_pane(rect, font, .{x, y}, .BOTTOM_RIGHT, pane_text, hex_color("ffffff"), hex_color("181818"));
+        }
+
+        // status bar left
+        {
+            builder: String_Builder; builder.allocator = temp;
+            print(*builder, "scroll: %, %    ", fmt(scroll_columns, 1), fmt(scroll_rows, 1));
+
+            jump_duration, ok := calculate_last_jump_duration();
+            print(*builder, "jump time: ");
+            if ok {
+                print_pretty_duration(*builder, jump_duration);
+            } else {
+                print(*builder, "?");
+            }
+            append(*builder, "    ");
+
+            pane_text := trim(builder_to_string(*builder,, temp));
+
+            x := cast(float) left(status_bar_rect);
+            draw_simple_text_pane(rect, font, .{x, y}, .BOTTOM_LEFT, pane_text, hex_color("ffffff"), hex_color("181818"));
+        }
     }
 
     // @TEMPORARY
@@ -1037,7 +1075,7 @@ update_and_draw_frame :: () -> bool {
         }
 
         pane_text := builder_to_string(*builder,, temp);
-        draw_simple_text_pane(rect, font, .{xx x, xx y}, .MIDDLE, pane_text, hex_color("ffffff"), hex_color("181818"));
+        draw_simple_text_pane(rect, font, .{xx x, xx y}, .CENTER, pane_text, hex_color("ffffff"), hex_color("181818"));
     }
     */
 
@@ -1163,7 +1201,7 @@ do_scroll_bar_anchors :: (parent_rect: Rectangle, anchors: [] $T, color: Vector4
             inline draw_scroll_bar_anchor(x, y, w, h, t, color_, false);
             #if T == Anchor if hover || it.flags & .TEXT_VISIBLE {
                 label_right := x + p1.x - 1;
-                draw_simple_text_pane(window_rect, ui_font.regular, .{label_right, y}, .MIDDLE_RIGHT, it.text, ui_element_text_color, ui_element_background_color);
+                draw_simple_text_pane(window_rect, ui_font.regular, .{label_right, y}, .CENTER_RIGHT, it.text, ui_element_text_color, ui_element_background_color);
             }
             if hover then array_add(*hover_indexes, it_index);
 
@@ -1355,7 +1393,9 @@ draw_the_text_pane :: (buffer: *Log_Text_Buffer, rect: Rectangle, handle_mouse: 
         search_matches_cursor := 0;
         line_index := 0;
         first_line = max(cast(int) floor(scroll_rows), 0);
-        last_line = min(first_line + 1 + cast(int) floor(rect.height / cast(float) h), buffer.line_infos.count - 1);
+        // I'm drawing +1 lines because I don't want them to pop in while smoothly scrolling downwards @HACK
+        hack := 1;
+        last_line = min(first_line + hack + cast(int) floor(rect.height / cast(float) h), buffer.line_infos.count - 1);
         for line_index: first_line..last_line {
             info := *buffer.line_infos[line_index];
             line := get_line(buffer, line_index);
@@ -1432,9 +1472,8 @@ draw_the_text_pane :: (buffer: *Log_Text_Buffer, rect: Rectangle, handle_mouse: 
             }
 
             // handle search match
-            if the_text_search_ui.flags & .OPEN
-                // TODO @INCOMPLETE draw all matches, not just the first ones
-                draw_search_match_border(rect, main_font, text_x_tweak, y, line_index, line.count, *search_matches_cursor);
+            // TODO @INCOMPLETE draw all matches, not just the first ones
+            draw_search_match_border(rect, main_font, text_x_tweak, y, line_index, line.count, *search_matches_cursor);
 
         }
 
@@ -4278,8 +4317,14 @@ rectangle_of :: (menu: *Popup_Menu) -> Rectangle {
 
 Point_Relative_To :: enum {
     TOP_LEFT;
-    MIDDLE_RIGHT;
-    MIDDLE;
+    TOP_RIGHT;
+    TOP_CENTER;
+    BOTTOM_LEFT;
+    BOTTOM_RIGHT;
+    BOTTOM_CENTER;
+    CENTER_LEFT;
+    CENTER_RIGHT;
+    CENTER;
 }
 
 draw_simple_text_pane :: (parent_rect: Rectangle, font: *Simp.Dynamic_Font, point: Vector2, relative_to: Point_Relative_To, text: string, text_color: Vector4, background_color: Vector4) {
@@ -4300,16 +4345,34 @@ draw_simple_text_pane :: (parent_rect: Rectangle, font: *Simp.Dynamic_Font, poin
     }
 
     H := h * line_count;
-    x_left, y_top: float;
+    x_left: float;
     if #complete relative_to == {
-        case .TOP_LEFT;
+        case .TOP_LEFT; #through;
+        case .BOTTOM_LEFT; #through;
+        case .CENTER_LEFT;
             x_left = parent_rect.left + point.x;
-            y_top = bottom(parent_rect) + point.y;
-        case .MIDDLE_RIGHT;
+        case .TOP_RIGHT; #through;
+        case .BOTTOM_RIGHT; #through;
+        case .CENTER_RIGHT;
             x_left = parent_rect.left + point.x - text_w_max;
-            y_top = bottom(parent_rect) + H / 2 + point.y;
-        case .MIDDLE;
+        case .TOP_CENTER; #through;
+        case .BOTTOM_CENTER; #through;
+        case .CENTER;
             x_left = parent_rect.left + point.x - text_w_max / 2;
+    }
+    y_top: float;
+    if #complete relative_to == {
+        case .TOP_LEFT; #through;
+        case .TOP_RIGHT; #through;
+        case .TOP_CENTER;
+            y_top = bottom(parent_rect) + point.y;
+        case .BOTTOM_LEFT; #through;
+        case .BOTTOM_RIGHT; #through;
+        case .BOTTOM_CENTER;
+            y_top = bottom(parent_rect) + point.y + H;
+        case .CENTER_LEFT; #through;
+        case .CENTER_RIGHT; #through;
+        case .CENTER;
             y_top = bottom(parent_rect) + H / 2 + point.y;
     }
 
