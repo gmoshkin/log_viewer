@@ -35,6 +35,10 @@ main :: () {
     context.logger = my_logger;
     context.print_style.struct_printer = my_struct_printer;
 
+    exe_path := System.get_path_of_running_executable();
+    exe_dir := path_strip_filename(exe_path);
+    assets_directory = sprint("%assets", exe_dir);
+
     log("working directory: '%'", get_working_directory());
     from_clipboard := parse_command_line_arguments();
 
@@ -93,10 +97,6 @@ main :: () {
         types := NSArray(NSPasteboardType).arrayWithObject(NSPasteboardTypeFileURL);
         NSView.registerForDraggedTypes(window, types);
     }
-
-    exe_path := System.get_path_of_running_executable();
-    exe_dir := path_strip_filename(exe_path);
-    assets_directory = sprint("%/assets", exe_dir);
 
     set_allocators(*escape_code_stats_pool);
     escape_code_stats_allocator = .{pool_allocator_proc, *escape_code_stats_pool};
@@ -709,19 +709,11 @@ update_and_draw_frame :: () -> bool {
         x_tweak := 0;
         y_tweak := 0;
 
-        filenames := the_text_buffer.request.filenames;
-        if filenames {
-            text: string;
-            if filenames.count > 1 {
-                text = tprint("%*%", common_prefix(filenames), common_postfix(filenames));
-            } else {
-                text = copy_string(filenames[0],, temp);
-            }
-            w_text := Simp.prepare_text(font.regular, text);
-            x := rect.left + (rect.width - w_text) * .5;
-            y -= xx (font.line_height + 4.0);
-            Simp.draw_prepared_text(font.regular, xx (x - x_tweak), xx (y + y_tweak), ui_element_text_color);
-        }
+        w_text := Simp.prepare_text(font.regular, the_text_buffer.filename);
+        x := rect.left + (rect.width - w_text) * .5;
+        y -= xx (font.line_height + 4.0);
+        Simp.draw_prepared_text(font.regular, xx (x - x_tweak), xx (y + y_tweak), ui_element_text_color);
+
         y -= xx font.line_height;
 
         {
@@ -987,8 +979,6 @@ update_and_draw_frame :: () -> bool {
         y := window_rect.top - 4.0;
 
         builder: String_Builder; builder.allocator = temp;
-        elapsed := seconds_since_init() - t0;
-        print(*builder, "% %\n", frame_counter, fmt(elapsed, 6));
         print(*builder, "scroll: %, %\n", fmt(scroll_columns, 1), fmt(scroll_rows, 1));
 
         jump_duration, ok := calculate_last_jump_duration();
@@ -1060,6 +1050,12 @@ update_and_draw_frame :: () -> bool {
     Simp.swap_buffers(window);
     Profile("swap_buffers");
     frame_counter += 1;
+
+    #if OS == .WINDOWS {
+        Windows :: #import "Windows";
+        elapsed := seconds_since_init() - t0;
+        Windows.SetWindowTextA(window, tprint("% (% %)\x00", the_text_buffer.filename, frame_counter, fmt(elapsed, 6)).data);
+    }
 
     return should_quit;
 }
@@ -1720,6 +1716,7 @@ screen_position_to_line_index :: (rect: Rectangle, y: float) -> s64 {
 
 Log_Text_Buffer :: struct {
     all_text: string;
+    filename: string;
     line_infos: [..] Log_Line_Info;
     max_line_length: int;
 
@@ -1809,6 +1806,21 @@ get_line :: (using buffer: *Log_Text_Buffer, line_index: int) -> string {
     return line;
 }
 
+set_buffer_filename :: (using buffer: *Log_Text_Buffer, filenames: .. string) {
+    free(buffer.filename);
+
+    if !filenames {
+        buffer.filename = copy_string("uknown file");
+        return;
+    }
+
+    if filenames.count > 1 {
+        buffer.filename = sprint("%*%", common_prefix(filenames), common_postfix(filenames));
+    } else {
+        buffer.filename = copy_string(filenames[0]);
+    }
+}
+
 //
 // buffer mutations
 //
@@ -1875,13 +1887,11 @@ load_text_buffer_data :: (buffer: *Log_Text_Buffer, _filenames: [] string = .[],
         log("reading text data from clipboard");
         new_data = os_clipboard_get_text();
     } else {
+        assert(_filenames.count > 0);
+
         buffer.parsing_state = "reading from file";
 
         filenames := _filenames;
-        if !filenames {
-            sample_file := tprint("%/sample_log.txt", assets_directory);
-            filenames = .[sample_file];
-        }
 
         buffer.skipped_based_on_timestamp = 0;
         new_data = load_data_from_files(buffer, filenames, skip_until);
@@ -2292,6 +2302,11 @@ request_load_text_buffer_data :: (buffer: *Log_Text_Buffer, filenames: [] string
     buffer.request.version += 1;
     buffer.request.type = ifx from_clipboard then .LOAD_CLIPBOARD else .LOAD_FILE;
     set_filenames(*buffer.request, filenames);
+    if from_clipboard {
+        set_buffer_filename(buffer, "clipboard contents");
+    } else {
+        set_buffer_filename(buffer, ..filenames);
+    }
     buffer.request.skip_until = skip_until;
 
     wake(*parsing_cond);
@@ -5198,6 +5213,10 @@ parse_command_line_arguments :: () {
         exit(1);
     }
 
+    if !input_file_full_paths {
+        sample_file := tprint("%/sample_log.txt", assets_directory);
+        array_add(*input_file_full_paths, sample_file);
+    }
 }
 
 convert_wsl_path_to_windows :: (path: string) -> string {
