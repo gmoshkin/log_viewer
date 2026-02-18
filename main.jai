@@ -479,10 +479,15 @@ update_and_draw_frame :: () -> bool {
         }
 
         // modules/Input doesn't set it.ctrl_pressed for MOUSE_WHEEL :(
-        else if it.type == .MOUSE_WHEEL && modifiers == .SHIFT && !draggin_scroll_bar {
-            ofs := it.wheel_delta / cast(float) it.typical_wheel_delta;
-            pane_width_in_characters := text_pane_rect.width / main_font.mono_width;
-            target_scroll_columns += -ofs * (pane_width_in_characters / 16);
+        else if it.type == .MOUSE_WHEEL && modifiers & .SHIFT && !draggin_scroll_bar {
+            if modifiers & .ALT {
+                ofs_sign := sign(it.wheel_delta);
+                target_scroll_columns += -ofs_sign;
+            } else {
+                ofs := it.wheel_delta / cast(float) it.typical_wheel_delta;
+                pane_width_in_characters := text_pane_rect.width / main_font.mono_width;
+                target_scroll_columns += -ofs * (pane_width_in_characters / 16);
+            }
             target_scroll_columns = max(target_scroll_columns, 0);
             request_redraw(tprint("scroll at %", #line));
         }
@@ -495,9 +500,14 @@ update_and_draw_frame :: () -> bool {
             request_redraw(tprint("scroll at %", #line));
         }
 
-        else if it.key_code == xx #char "F" && it.ctrl_pressed && !(the_text_search_ui.flags & .OPEN) {
+        else if it.key_pressed && it.key_code == xx #char "F" && it.ctrl_pressed && !(the_text_search_ui.flags & .OPEN) {
             open_text_search_ui();
             request_redraw("open search ui");
+        }
+
+        else if it.key_pressed && it.key_code == xx #char "M" && it.ctrl_pressed {
+            jump_to_next_explicit_anchor(forwards=!it.shift_pressed);
+            request_redraw("jump to next anchor");
         }
 
         else if it.key_pressed && it.key_code == .PAGE_UP {
@@ -3882,6 +3892,37 @@ get_anchor_at_line_index :: (line_index: int) -> anchor_index: int {
     return -1;
 }
 
+jump_to_next_explicit_anchor :: (forwards: bool) {
+    effective_position := target_scroll_rows + jump_destination_row_offset();
+    current_line_index := cast(int) floor(effective_position);
+    if effective_position - xx current_line_index > 0 && forwards {
+        current_line_index += 1;
+    }
+
+    // @ROBUSTNESS assuming anchors are ordered
+    matched_line_index := -1;
+    if forwards {
+        for explicit_anchors {
+            if it.line_index > current_line_index {
+                matched_line_index = it.line_index;
+                break;
+            }
+        }
+    } else {
+        for < explicit_anchors {
+            if it.line_index < current_line_index {
+                matched_line_index = it.line_index;
+                break;
+            }
+        }
+    }
+
+    if matched_line_index >= 0 {
+        old_target_scroll_rows = target_scroll_rows;
+        target_scroll_rows = matched_line_index - jump_destination_row_offset();
+    }
+}
+
 anchor_button_toggle :: (line_index: int) {
     anchor_index := get_anchor_at_line_index(line_index);
 
@@ -5022,6 +5063,15 @@ draw_triangle :: inline (p0: Vector2, p1: Vector2, p2: Vector2, color: Vector4) 
 //
 // math
 //
+
+sign :: inline (v: $T/.[float, float64]) -> T {
+    if v == 0 return 0;
+    return v / abs(v);
+}
+
+sign :: inline (v: $T/.[s8, s16, s32, s64]) -> T {
+    return xx ifx v < 0 then -1 else ifx v == 0 then 0 else 1;
+}
 
 axis_aligned_rectangle_contains :: inline (rect: Rectangle, point: Vector2) -> bool {
     return axis_aligned_rectangle_contains(xx rect.left, xx (rect.top - rect.height),
@@ -6234,7 +6284,7 @@ array_ordered_remove_range :: inline (array_pointer: *[] $T, start: s64, end: s6
 
     if start == end return;
 
-    array := <<array_pointer;
+    array := array_pointer.*;
     count := end - start;
 
     for i : start..array.count-count-1
@@ -6535,7 +6585,7 @@ get_expr_info :: (code: Code) -> kind: Code_Node.Kind, op_type: s32, full_expr: 
             op_type := binop.operator_type;
             lhs := compiler_get_code(binop.left, code);
             rhs := compiler_get_code(binop.right, code);
-            return xx root.kind, op_type, full_expr, "", lhs, rhs;
+            return xx root.kind, xx op_type, full_expr, "", lhs, rhs;
 
         case .PROCEDURE_CALL;
             proccall := cast(*Code_Procedure_Call) root;
