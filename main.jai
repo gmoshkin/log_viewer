@@ -2336,7 +2336,7 @@ Log_Line_Info :: struct {
     fiber_id: s16 = -1;
     fiber_name_offset: s16 = -1;
 
-    escape_codes_start: s16;
+    escape_codes_start: s32;
     escape_codes_count: s16;
 
     source_id: u8 = SOURCE_ID_UNKNOWN;
