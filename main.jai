@@ -2,9 +2,6 @@
 
 TODO:
 
-- context menu on text line:
-    - copy line to clipboard
-
 - when drawing text pane do 2 passes
     - first draw background colors
     - here can draw the time graph and other middle-ground stuff
@@ -410,7 +407,7 @@ update_and_draw_frame :: () -> bool {
     } else {
         anchor_kind := hovered_scroll_bar_anchor_kind;
         // I'm not actually sure this is needed...
-        mouse_in_rect := mouse - .{xx scroll_bar_rect.left, xx bottom(scroll_bar_rect)};
+        mouse_in_rect := mouse - .{xx scroll_bar_rect.left, 0};
         anchor_index := do_scroll_bar_anchors(scroll_bar_rect, explicit_anchors, anchor_button_active_color, .GET_HOVER, mouse_in_rect, t=15);
         if anchor_index != -1 {
             anchor_kind = .EXPLICIT;
@@ -2998,12 +2995,61 @@ log_source_color_scheme := Vector4.[
     color_brown,
 ];
 
-get_log_source_color :: (source_id: u8) -> Vector4 {
-    if source_id == SOURCE_ID_UNKNOWN return main_text_pane_text_color;
+get_log_source_color :: (source_id: u8) -> (Vector4, int) {
+    if source_id == SOURCE_ID_UNKNOWN return main_text_pane_text_color, -1;
 
-    for the_text_buffer.merged_log_sources if it.from == source_id return get_log_source_color(it.to);
+    for the_text_buffer.merged_log_sources if it.from == source_id {
+        color, index := get_log_source_color(it.to);
+        return color, index;
+    }
 
-    return log_source_color_scheme[source_id % log_source_color_scheme.count];
+    index := source_id % log_source_color_scheme.count;
+    return log_source_color_scheme[index], index;
+}
+
+Log_Source_Alias_Info :: struct { source_id: u8; name: string; };
+get_aliases :: (target_source_id: u8) -> (string, [] Log_Source_Alias_Info) {
+    result: [..] Log_Source_Alias_Info;
+    result.allocator = temp;
+
+    _, target_index := get_log_source_color(target_source_id);
+
+    for log_source, source_id: the_text_buffer.all_log_sources {
+        _, index := get_log_source_color(xx source_id);
+        if index == target_index {
+            array_add(*result, .{xx source_id, log_source});
+        }
+    }
+
+    best: string;
+    for result {
+        if !starts_with(it.name, ":") {
+            best = it.name;
+            remove it;
+            break;
+        }
+    }
+    if !best {
+        best = result[0].name;
+        array_unordered_remove_by_index(*result, 0);
+    }
+
+    return best, result;
+}
+
+make_alias_text :: (best: string, rest: [] Log_Source_Alias_Info) -> string {
+    if !rest return best;
+
+    builder: String_Builder;
+    builder.allocator = temp;
+
+    print(*builder, "% (aka ", best);
+    for array_view(rest, 0, rest.count - 1) {
+        print(*builder, "%, ", it.name);
+    }
+    print(*builder, "%)", last(rest).name);
+
+    return builder_to_string(*builder);
 }
 
 log_info_open_popup_menu :: (info: *Log_Line_Info, mouse: Vector2, line_index: int, type: Log_Info_Piece_Type) {
@@ -3015,16 +3061,36 @@ log_info_open_popup_menu :: (info: *Log_Line_Info, mouse: Vector2, line_index: i
     popup_menu_push_item(menu, "Copy line to clipboard", id=xx COPY_WHOLE_LINE);
     popup_menu_push_item(menu, "Add to search query", id=xx ADD_TO_SEARCH);
 
+    for log_source, source_id: the_text_buffer.all_log_sources {
+        // Skip self
+        if source_id == info.source_id continue;
+
+        if !ok_to_merge(the_text_buffer.merged_log_sources, from=xx source_id, to=info.source_id) continue;
+
+        best_alias, aliases := get_aliases(xx source_id);
+        alias := make_alias_text(best_alias, aliases,, temp);
+
+        color := get_log_source_color(xx source_id);
+        pids := table_find_multiple(*the_text_buffer.sources_to_pid, log_source);
+        item_id := xx SWAP_COLOR + source_id;
+        assert(item_id < xx UNUSED);
+        popup_menu_push_item(menu, "Swap color with %", alias, id=item_id, icon=.{color, 8.0, .SQUARE});
+    }
+
     if type == .SOURCE for log_source, source_id: the_text_buffer.all_log_sources {
         // Skip self
         if source_id == info.source_id continue;
 
         if !ok_to_merge(the_text_buffer.merged_log_sources, from=xx source_id, to=info.source_id) continue;
 
+        best_alias, aliases := get_aliases(xx source_id);
+        alias := make_alias_text(best_alias, aliases,, temp);
+
         color := get_log_source_color(xx source_id);
         pids := table_find_multiple(*the_text_buffer.sources_to_pid, log_source);
         item_id := xx MERGE_SOURCE + source_id;
-        popup_menu_push_item(menu, "Merge with % (pid: %)", log_source, pids, id=item_id, icon=.{color, 8.0, .SQUARE});
+        assert(item_id < xx SWAP_COLOR);
+        popup_menu_push_item(menu, "Merge with % (pid: %)", alias, pids, id=item_id, icon=.{color, 8.0, .SQUARE});
     }
 }
 
@@ -3034,6 +3100,23 @@ line_open_popup_menu :: (info: *Log_Line_Info, mouse: Vector2, line_index: int) 
 
     using Log_Line_Popup_Menu_Item;
     popup_menu_push_item(menu, "Copy line to clipboard", id=xx COPY_WHOLE_LINE);
+
+    _, index := get_log_source_color(info.source_id);
+    if index != -1 for log_source, source_id: the_text_buffer.all_log_sources {
+        // Skip self
+        if source_id == info.source_id continue;
+
+        if !ok_to_merge(the_text_buffer.merged_log_sources, from=xx source_id, to=info.source_id) continue;
+
+        best_alias, aliases := get_aliases(xx source_id);
+        alias := make_alias_text(best_alias, aliases,, temp);
+
+        color := get_log_source_color(xx source_id);
+        pids := table_find_multiple(*the_text_buffer.sources_to_pid, log_source);
+        item_id := xx SWAP_COLOR + source_id;
+        assert(item_id < xx UNUSED);
+        popup_menu_push_item(menu, "Swap color with %", alias, id=item_id, icon=.{color, 8.0, .SQUARE});
+    }
 }
 
 add_source :: (sources: *[..] string, source: string) -> source_id: u8 {
@@ -3101,6 +3184,15 @@ detect_cycle :: (merges: [] Merge_Info, from: u8, to: u8) -> found_cycle: bool {
     return false;
 }
 
+are_merged :: (merges: [] Merge_Info, from: u8, to: u8) -> bool {
+    if from == to return true;
+    for merge: merges {
+        if merge.from == from && merge.to == to return true;
+        if merge.to == from && merge.from == to return true;
+    }
+    return false;
+}
+
 Log_Line_Popup_Menu_Callback_Data :: struct {
     line_index: int;
     type: Log_Info_Piece_Type;
@@ -3111,6 +3203,8 @@ Log_Line_Popup_Menu_Item :: enum {
     COPY_WHOLE_LINE;
     ADD_TO_SEARCH;
     MERGE_SOURCE :: 0x100;
+    SWAP_COLOR :: 0x200;
+    UNUSED :: 0x300;
 }
 
 log_line_popup_menu_callback :: (menu: *Popup_Menu, event: Popup_Menu.Event) {
@@ -3164,11 +3258,20 @@ log_line_popup_menu_callback :: (menu: *Popup_Menu, event: Popup_Menu.Event) {
             save_completions(*the_text_search_ui, new_completions);
             open_text_search_ui();
         }
+
+        if item_id >= .SWAP_COLOR && item_id < .UNUSED {
+            id := cast(int) item_id - cast(int) Log_Line_Popup_Menu_Item.SWAP_COLOR;
+            this_source_id := info.source_id;
+            _, this_index := get_log_source_color(this_source_id);
+            _, that_index := get_log_source_color(xx id);
+            swap(*log_source_color_scheme[this_index], *log_source_color_scheme[that_index]);
+            log("swaped source colors % and %", this_source_id, id);
+        }
     }
 
     if type == .SOURCE {
         if event == .CLICK {
-            if item_id >= .MERGE_SOURCE {
+            if item_id >= .MERGE_SOURCE && item_id < .SWAP_COLOR {
                 id := cast(int) item_id - cast(int) Log_Line_Popup_Menu_Item.MERGE_SOURCE;
                 this_source_id := info.source_id;
                 array_add(*buffer.merged_log_sources, .{to=xx this_source_id, from=xx id});
@@ -3327,6 +3430,7 @@ Search_Query_Match_All :: struct {
 Search_Query_Leaf :: struct {
     type: Log_Info_Piece_Type;
     value: string;
+    source_id: u8 = SOURCE_ID_UNKNOWN;
 }
 
 do_query_search :: (buffer: *Log_Text_Buffer, search_results: *Search_Results, queries: Search_Query, timeout: float64) {
@@ -3354,7 +3458,9 @@ do_query_search :: (buffer: *Log_Text_Buffer, search_results: *Search_Results, q
                 value, offset, count := inline lookup_log_info(buffer, line_index, query.type);
                 if !value continue match_any;
 
-                if query.value != "" {
+                if query.type == .SOURCE && query.source_id != SOURCE_ID_UNKNOWN {
+                    if !are_merged(buffer.merged_log_sources, line_info.source_id, query.source_id) continue match_any;
+                } else if query.value != "" {
                     index := inline find_index_from_left(value, query.value);
                     if index == -1 continue match_any;
                     offset += xx index;
@@ -3514,6 +3620,15 @@ parse_search_query_leaf :: (text: string, buffer: *Log_Text_Buffer = null, $need
                 if !starts_with(it, result.value) continue;
 
                 array_add(*completions, it,, temp);
+            }
+        }
+    }
+
+    if result.type == .SOURCE && buffer {
+        for log_source, source_id: buffer.all_log_sources {
+            if log_source == result.value {
+                result.source_id = xx source_id;
+                break;
             }
         }
     }
