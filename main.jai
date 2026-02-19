@@ -13,16 +13,12 @@ TODO:
   The ui for navigation could be as simple as 2 arrows: back and forward, but
   if there's a branch there's multiple arrows forward.
 
-- adding text notes to anchors
-
 - serializing the setup, save/restore
 
 - log parsing + semantic highlighting
 - preview line at scroll bar anchor hovered over with mouse
 - filterring/hiding? I'm not sure yet what I want/need
-- status bar
 - different panes for different ui elements
-- minimap (scroll bar almost does everything now)
 
 */
 
@@ -481,6 +477,10 @@ update_and_draw_frame :: () -> bool {
             }
         }
 
+        else if it.key_code == .MOUSE_BUTTON_MIDDLE {
+            request_redraw("middle mouse button");
+        }
+
         else if it.key_code == #char "0" && it.ctrl_pressed && !it.shift_pressed && !it.alt_pressed {
             main_font.pixel_height = main_font_default_pixel_height;
             main_font.pixel_height = max(main_font.pixel_height, 1);
@@ -516,6 +516,11 @@ update_and_draw_frame :: () -> bool {
         else if it.key_pressed && it.key_code == xx #char "M" && it.ctrl_pressed {
             jump_to_next_explicit_anchor(forwards=!it.shift_pressed);
             request_redraw("jump to next anchor");
+        }
+
+        else if it.key_pressed && it.key_code == xx #char "G" && it.alt_pressed {
+            show_time_graph = !show_time_graph;
+            request_redraw("show time graph");
         }
 
         else if it.key_pressed && it.key_code == xx #char "G" && it.ctrl_pressed {
@@ -1030,7 +1035,11 @@ update_and_draw_frame :: () -> bool {
         // status bar left
         {
             builder: String_Builder; builder.allocator = temp;
-            print(*builder, "scroll: %, %    ", fmt(scroll_columns, 1), fmt(scroll_rows, 1));
+            print(*builder, "scroll: %/%", fmt(scroll_rows, 1), the_text_buffer.line_infos.count);
+            if scroll_rows != 0 {
+                print(*builder, "    %", fmt(scroll_columns, 1));
+            }
+            append(*builder, "    ");
 
             jump_duration, ok := calculate_last_jump_duration();
             print(*builder, "jump time: ");
@@ -1481,6 +1490,7 @@ draw_the_text_pane :: (buffer: *Log_Text_Buffer, rect: Rectangle, handle_mouse: 
     global_time_current_line = APOLLO_TIME_INVALID;
 
     // time stamp graph
+    if show_time_graph && !is_down(.MOUSE_BUTTON_MIDDLE) || !show_time_graph && is_down(.MOUSE_BUTTON_MIDDLE)
     {
         h := main_font.line_height;
         y_top := rect.top + (cast(float, scroll_rows) - 0.5) * h;
@@ -1799,6 +1809,8 @@ Log_Text_Buffer :: struct {
     parsing_cursor: s64;
 }
 the_text_buffer: Log_Text_Buffer;
+
+show_time_graph := true;
 
 quicksort_duration: float64;
 
@@ -3075,6 +3087,7 @@ log_info_open_popup_menu :: (info: *Log_Line_Info, mouse: Vector2, line_index: i
         item_id := xx SWAP_COLOR + source_id;
         assert(item_id < xx UNUSED);
         popup_menu_push_item(menu, "Swap color with %", alias, id=item_id, icon=.{color, 8.0, .SQUARE});
+        // TODO also allow setting one of the colors in the color scheme
     }
 
     if type == .SOURCE for log_source, source_id: the_text_buffer.all_log_sources {
@@ -3116,6 +3129,7 @@ line_open_popup_menu :: (info: *Log_Line_Info, mouse: Vector2, line_index: int) 
         item_id := xx SWAP_COLOR + source_id;
         assert(item_id < xx UNUSED);
         popup_menu_push_item(menu, "Swap color with %", alias, id=item_id, icon=.{color, 8.0, .SQUARE});
+        // TODO also allow setting one of the colors in the color scheme
     }
 }
 
