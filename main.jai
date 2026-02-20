@@ -775,6 +775,7 @@ update_and_draw_frame :: () -> bool {
 
         jump_duration, ok, old_index, new_index := calculate_last_jump_duration();
 
+        // jump visualizer on left column
         if old_index != -1 || new_index != -1 {
             top_index, bottom_index := old_index, new_index;
             if top_index > bottom_index then swap(*top_index, *bottom_index);
@@ -815,6 +816,7 @@ update_and_draw_frame :: () -> bool {
             }
         }
 
+        // jump time on left column
         if ok {
             jump_destination_y := jump_destination_row_offset();
             text_y := floor(parent_top - (jump_destination_y + 0.5) * H);
@@ -844,6 +846,28 @@ update_and_draw_frame :: () -> bool {
                 quad.p3 = p + .{-(quad.p3.y - p.y), (quad.p3.x - p.x)};
             }
             Simp.draw_generated_quads(font.regular, popup_menu_item_text_color);
+        }
+
+        // jump visualizer on scroll bar
+        {
+            top_index, bottom_index := old_index, new_index;
+            if top_index > bottom_index then swap(*top_index, *bottom_index);
+
+            color := anchor_line_highlight_color;
+            w := 2.0;
+            x_middle := left(scroll_bar_rect) - 22.0;
+
+            y_top := scroll_bar_rect.top - (top_index / cast(float) lines_per_scroll_bar_pixel);
+            y_bottom := scroll_bar_rect.top - (bottom_index / cast(float) lines_per_scroll_bar_pixel);
+            h := y_top - y_bottom;
+
+            draw_axis_aligned_rectangle(xx (x_middle - w / 2), xx y_bottom, xx w, xx h, color);
+
+            end_w := 8.0;
+            x := x_middle - end_w / 2.0;
+            end_h := w;
+            draw_axis_aligned_rectangle(xx x, xx y_top, xx end_w, xx end_h, color);
+            draw_axis_aligned_rectangle(xx x, xx y_bottom, xx end_w, xx end_h, color);
         }
     }
 
@@ -1099,13 +1123,9 @@ update_and_draw_frame :: () -> bool {
         W := width(status_bar_rect);
         H := height(status_bar_rect);
 
-        jump_duration, ok, old_index, new_index := calculate_last_jump_duration();
-
         // status bar right
         {
             builder: String_Builder; builder.allocator = temp;
-
-            print(*builder, "old_index: %, new_index: % ", old_index, new_index);
 
             for redraw_reasons print(*builder, "% ", it);
             if redraw_reasons print(*builder, " |  ");
@@ -1129,14 +1149,6 @@ update_and_draw_frame :: () -> bool {
             print(*builder, "scroll: %/%", fmt(scroll_rows, 1), the_text_buffer.line_infos.count);
             if scroll_columns != 0 {
                 print(*builder, "    %", fmt(scroll_columns, 1));
-            }
-            append(*builder, "    ");
-
-            print(*builder, "jump time: ");
-            if ok {
-                print_pretty_duration(*builder, jump_duration);
-            } else {
-                print(*builder, "?");
             }
             append(*builder, "    ");
 
