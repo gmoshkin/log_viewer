@@ -478,6 +478,7 @@ update_and_draw_frame :: () -> bool {
         }
 
         else if it.key_code == .MOUSE_BUTTON_MIDDLE {
+            // Handled explicitly elsewhere
             request_redraw("middle mouse button");
         }
 
@@ -508,6 +509,19 @@ update_and_draw_frame :: () -> bool {
             request_redraw(tprint("scroll at %", #line));
         }
 
+        else if it.key_pressed && it.key_code == .MOUSE_BUTTON_EXTRA_1 {
+            if current_previous_jump() != target_scroll_rows {
+                push_jump_to_history(target_scroll_rows);
+            }
+            if do_undo_or_redo_for_jump_history(.UNDO) target_scroll_rows = current_previous_jump();
+            request_redraw("jump back");
+        }
+
+        else if it.key_pressed && it.key_code == .MOUSE_BUTTON_EXTRA_2 {
+            if do_undo_or_redo_for_jump_history(.REDO) target_scroll_rows = current_previous_jump();
+            request_redraw("jump forward");
+        }
+
         else if it.key_pressed && it.key_code == xx #char "F" && it.ctrl_pressed && !(the_text_search_ui.flags & .OPEN) {
             open_text_search_ui();
             request_redraw("open search ui");
@@ -521,6 +535,11 @@ update_and_draw_frame :: () -> bool {
         else if it.key_pressed && it.key_code == xx #char "G" && it.alt_pressed {
             show_time_graph = !show_time_graph;
             request_redraw("show time graph");
+        }
+
+        else if it.key_pressed && it.key_code == xx #char "J" && it.alt_pressed {
+            debug_jump_history = !debug_jump_history;
+            request_redraw("debug_jump_history");
         }
 
         else if it.key_pressed && it.key_code == xx #char "G" && it.ctrl_pressed {
@@ -617,7 +636,7 @@ update_and_draw_frame :: () -> bool {
             case .SEARCH_MATCH; line_index = search_results.matches[hovered_scroll_bar_anchor_index].line_index;
         }
         if is_click(.MOUSE_BUTTON_LEFT) {
-            old_target_scroll_rows = target_scroll_rows;
+            push_jump_to_history(target_scroll_rows);
             target_scroll_rows = xx (line_index - jump_destination_row_offset());
         } else if is_click(.MOUSE_BUTTON_RIGHT) {
             anchor_button_open_popup_menu(line_index, mouse);
@@ -628,7 +647,7 @@ update_and_draw_frame :: () -> bool {
         pixels_from_top := top(scroll_bar_rect) - mouse.y;
         fraction_from_top := pixels_from_top / height(scroll_bar_rect);
         line_index := total_line_count * fraction_from_top;
-        old_target_scroll_rows = target_scroll_rows;
+        push_jump_to_history(target_scroll_rows);
         target_scroll_rows = xx (line_index - text_pane_row_count / 2);
     }
 
@@ -1099,6 +1118,26 @@ update_and_draw_frame :: () -> bool {
         do_popup_menu(*the_popup_menu, mouse, handle_mouse, do_draw=true);
     }
 
+    // debuggin jump history
+    if debug_jump_history
+    {
+        color := Vector4.{1,1,1,1};
+        w := 2.0;
+        x := left(scroll_bar_rect) - 30.0;
+        font := ui_font;
+
+        for jump_history {
+            y := scroll_bar_rect.top - (it / cast(float) lines_per_scroll_bar_pixel) - 10;
+
+            if it_index == current_position_in_jump_history {
+                color = .{1,0,1,1};
+            } else {
+                color = .{1,1,1,1};
+            }
+            Simp.draw_text(font.regular, xx x, xx y, tprint("%", it_index + 1), color);
+        }
+    }
+
     // debuggin pane
     {
         rect := window_rect;
@@ -1212,7 +1251,6 @@ update_and_draw_frame :: () -> bool {
 
 scroll_rows: float64 = 0.0;
 target_scroll_rows: float64 = 0.0;
-old_target_scroll_rows: float64 = 0.0;
 
 scroll_rows_lerp_factor := 0.5;
 scroll_rows_at_click: float64 = 0.0;
@@ -1263,7 +1301,7 @@ get_instant_for_line :: (_line_index: int) -> Apollo_Time {
 }
 
 calculate_last_jump_duration :: () -> float64, bool, int, int {
-    old_index := cast(int, old_target_scroll_rows + jump_destination_row_offset());
+    old_index := cast(int, old_jump_for_time_vis + jump_destination_row_offset());
     new_index := cast(int, target_scroll_rows + jump_destination_row_offset());
 
     if !safe_to_read_buffer_data(*the_text_buffer) return -1, false, old_index, new_index;
@@ -1423,6 +1461,49 @@ get_scroll_bar_triangle :: ($$t: float, x: float, y: float, $x_tweak := 2.0) -> 
     p1 := p0 + .{x_tweak - t, -t/2};
     p2 := p0 + .{x_tweak - t,  t/2};
     return p0, p1, p2;
+}
+
+//
+// jump history
+//
+
+old_jump_for_time_vis: float64;
+jump_history: [..] float64;
+current_position_in_jump_history := 0;
+debug_jump_history := false;
+
+push_jump_to_history :: (scroll_rows: float64) {
+    if jump_history && jump_history[current_position_in_jump_history] == scroll_rows return;
+
+    if current_position_in_jump_history + 1 < jump_history.count {
+        // Destruction of the array tail
+        jump_history.count = current_position_in_jump_history + 1;
+    }
+
+    old_jump_for_time_vis = scroll_rows;
+    array_add(*jump_history, scroll_rows);
+    current_position_in_jump_history = jump_history.count - 1;
+}
+
+do_undo_or_redo_for_jump_history :: (type: enum { UNDO; REDO; }) -> bool {
+    if type == .UNDO && current_position_in_jump_history > 0 {
+        old_jump_for_time_vis = jump_history[current_position_in_jump_history];
+        current_position_in_jump_history -= 1;
+        return true;
+    }
+
+    if type == .REDO && current_position_in_jump_history + 1 < jump_history.count {
+        old_jump_for_time_vis = jump_history[current_position_in_jump_history];
+        current_position_in_jump_history += 1;
+        return true;
+    }
+
+    return false;
+}
+
+current_previous_jump :: () -> float64 {
+    if !jump_history return 0.0;
+    return jump_history[current_position_in_jump_history];
 }
 
 //
@@ -4099,7 +4180,7 @@ jump_to_next_search_match :: (forwards: bool) {
     }
 
     if matched_line_index >= 0 {
-        old_target_scroll_rows = target_scroll_rows;
+        push_jump_to_history(target_scroll_rows);
         target_scroll_rows = matched_line_index - jump_destination_row_offset();
     }
 }
@@ -4204,7 +4285,7 @@ jump_to_next_explicit_anchor :: (forwards: bool) {
     }
 
     if matched_line_index >= 0 {
-        old_target_scroll_rows = target_scroll_rows;
+        push_jump_to_history(target_scroll_rows);
         target_scroll_rows = matched_line_index - jump_destination_row_offset();
     }
 }
