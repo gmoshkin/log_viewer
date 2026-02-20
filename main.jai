@@ -618,7 +618,7 @@ update_and_draw_frame :: () -> bool {
         }
         if is_click(.MOUSE_BUTTON_LEFT) {
             old_target_scroll_rows = target_scroll_rows;
-            target_scroll_rows = xx (line_index - text_pane_row_count / 2);
+            target_scroll_rows = xx (line_index - jump_destination_row_offset());
         } else if is_click(.MOUSE_BUTTON_RIGHT) {
             anchor_button_open_popup_menu(line_index, mouse);
         }
@@ -757,6 +757,93 @@ update_and_draw_frame :: () -> bool {
                 progress_slider.width = xx (progress_max_width * t);
                 draw_axis_aligned_rectangle(progress_slider, main_text_pane_dim_text_color);
             }
+        }
+    }
+
+    Profile("draw_jump_vis");
+    //
+    // time jump visualizer
+    //
+    {
+        rect := *left_column_rect;
+        x_tweak := -3;
+        y_tweak := 0;
+
+        parent_top := top(rect) + y_tweak;
+        H := main_font.line_height;
+        parent_right := right(rect) + x_tweak;
+
+        jump_duration, ok, old_index, new_index := calculate_last_jump_duration();
+
+        if old_index != -1 || new_index != -1 {
+            top_index, bottom_index := old_index, new_index;
+            if top_index > bottom_index then swap(*top_index, *bottom_index);
+
+            color := anchor_line_highlight_color;
+            w := 2.0;
+            x_middle := parent_right - H / 2.0;
+            x := x_middle - w / 2.0;
+
+            y_top := parent_top - (top_index - scroll_rows + 0.5) * H + w / 2;
+            y_bottom := parent_top - (bottom_index - scroll_rows + 0.5) * H - w / 2;
+            h := y_top - y_bottom;
+
+            draw_axis_aligned_rectangle(xx x, xx y_bottom, xx w, xx h, color);
+
+            {
+                y := y_bottom - w / 2;
+                if y > 0 && y < xx parent_top
+                {
+                    L := H - 4;
+                    w := L;
+                    x := x_middle - L / 2.0;
+                    h := 2.0;
+                    draw_axis_aligned_rectangle(xx x, xx y, xx w, xx h, color);
+                }
+            }
+
+            {
+                y := y_top - w / 2;
+                if y > 0 && y < xx parent_top
+                {
+                    L := H - 4;
+                    w := L;
+                    x := x_middle - L / 2.0;
+                    h := 2.0;
+                    draw_axis_aligned_rectangle(xx x, xx y, xx w, xx h, color);
+                }
+            }
+        }
+
+        if ok {
+            jump_destination_y := jump_destination_row_offset();
+            text_y := floor(parent_top - (jump_destination_y + 0.5) * H);
+            text_x := left(rect) + 24.0;
+            font := ui_font;
+
+            builder: String_Builder;
+            builder.allocator = temp;
+            print_pretty_duration(*builder, jump_duration);
+            text := builder_to_string(*builder,, temp);
+
+            text_w := Simp.prepare_text(font.regular, text);
+
+            p: Vector2;
+            p.x = text_x;
+            if new_index < old_index {
+                p.y = xx floor(text_y + H * .7 - text_w);
+            } else {
+                p.y = xx ceil(text_y + H * .7);
+            }
+            Simp.generate_quads_for_prepared_text(font.regular, xx p.x, xx p.y, effect_flags=0);
+            for *quad: font.regular.current_quads {
+                // rotate PI/2
+                quad.p0 = p + .{-(quad.p0.y - p.y), (quad.p0.x - p.x)};
+                quad.p1 = p + .{-(quad.p1.y - p.y), (quad.p1.x - p.x)};
+                quad.p2 = p + .{-(quad.p2.y - p.y), (quad.p2.x - p.x)};
+                quad.p3 = p + .{-(quad.p3.y - p.y), (quad.p3.x - p.x)};
+            }
+            Simp.draw_generated_quads(font.regular, popup_menu_item_text_color);
         }
     }
 
@@ -1012,9 +1099,13 @@ update_and_draw_frame :: () -> bool {
         W := width(status_bar_rect);
         H := height(status_bar_rect);
 
+        jump_duration, ok, old_index, new_index := calculate_last_jump_duration();
+
         // status bar right
         {
             builder: String_Builder; builder.allocator = temp;
+
+            print(*builder, "old_index: %, new_index: % ", old_index, new_index);
 
             for redraw_reasons print(*builder, "% ", it);
             if redraw_reasons print(*builder, " |  ");
@@ -1036,12 +1127,11 @@ update_and_draw_frame :: () -> bool {
         {
             builder: String_Builder; builder.allocator = temp;
             print(*builder, "scroll: %/%", fmt(scroll_rows, 1), the_text_buffer.line_infos.count);
-            if scroll_rows != 0 {
+            if scroll_columns != 0 {
                 print(*builder, "    %", fmt(scroll_columns, 1));
             }
             append(*builder, "    ");
 
-            jump_duration, ok := calculate_last_jump_duration();
             print(*builder, "jump time: ");
             if ok {
                 print_pretty_duration(*builder, jump_duration);
@@ -1160,21 +1250,22 @@ get_instant_for_line :: (_line_index: int) -> Apollo_Time {
     return (before + after) / 2;
 }
 
-calculate_last_jump_duration :: () -> float64, bool {
-    if !safe_to_read_buffer_data(*the_text_buffer) return -1, false;
-    if !the_text_buffer.line_infos return -1, false;
-
+calculate_last_jump_duration :: () -> float64, bool, int, int {
     old_index := cast(int, old_target_scroll_rows + jump_destination_row_offset());
-    old_instant := get_instant_for_line(old_index);
-    if !old_instant return 0.0, false;
-
     new_index := cast(int, target_scroll_rows + jump_destination_row_offset());
+
+    if !safe_to_read_buffer_data(*the_text_buffer) return -1, false, old_index, new_index;
+    if !the_text_buffer.line_infos return -1, false, old_index, new_index;
+
+    old_instant := get_instant_for_line(old_index);
+    if !old_instant return 0.0, false, old_index, new_index;
+
     new_instant := get_instant_for_line(new_index);
-    if !new_instant return 0.0, false;
+    if !new_instant return 0.0, false, old_index, new_index;
 
     diff := new_instant - old_instant;
     duration := abs(to_float64_seconds(diff));
-    return duration, true;
+    return duration, true, old_index, new_index;
 }
 
 // I hate this procedure
