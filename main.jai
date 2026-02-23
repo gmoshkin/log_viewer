@@ -2801,6 +2801,8 @@ parse_log_line :: (buffer: *Log_Text_Buffer, line: string, info: *Log_Line_Info,
         // skip whitespace
         while (cursor < line.count) && (inline is_space(line[cursor])) cursor += 1;
         if cursor >= line.count return false;
+
+        first_non_whitespace = cursor;
     }
 
     //
