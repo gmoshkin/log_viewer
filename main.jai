@@ -2,6 +2,8 @@
 
 TODO:
 
+- scrollbar for the popup menu (e.g. completion menu)
+
 - when drawing text pane do 2 passes
     - first draw background colors
     - here can draw the time graph and other middle-ground stuff
@@ -3786,12 +3788,12 @@ parse_search_query_leaf :: (text: string, buffer: *Log_Text_Buffer = null, $need
     // skip spaces
     while (cursor < text.count) && (inline is_space(text[cursor])) cursor += 1;
 
-    all_values := ifx buffer then get_all_entities_of_type(buffer, result.type);
-
-    if cursor == text.count return result, true, .{all_values, 0}, cursor;
+    if cursor == text.count return result, true, .{string.["="], 0}, cursor;
 
     if text[cursor] != #char "=" return .{}, false, .{}, cursor;
     cursor += 1;
+
+    all_values := ifx buffer then get_all_entities_of_type(buffer, result.type);
 
     // skip spaces
     while (cursor < text.count) && (inline is_space(text[cursor])) cursor += 1;
@@ -4094,6 +4096,7 @@ Text_Search_UI :: struct {
 
     // strings owned by `completions_storage`
     completions: Completions;
+    completion_menu: Popup_Menu;
     completions_pool: Pool;
 }
 the_text_search_ui: Text_Search_UI;
@@ -4143,16 +4146,36 @@ text_search_ui_handle_input_event :: (event: Input.Event) -> handled: bool {
     return xx status;
 }
 
+setup_completion_menu :: (ui: *Text_Search_UI) {
+    ui.completion_menu.allocator = .{pool_allocator_proc, *ui.completions_pool};
+    ui.completion_menu.items.allocator = .{pool_allocator_proc, *ui.completions_pool};
+    ui.completion_menu.at.x = xx (left(ui.rect) + 5);
+    ui.completion_menu.at.y = xx top(ui.rect);
+    ui.completion_menu.relative_to = .BOTTOM_LEFT;
+    ui.completion_menu.font = *main_font;
+}
+
 save_completions :: (ui: *Text_Search_UI, new_completions: Completions) {
-    if !ui.completions_pool.block_allocator.proc then set_allocators(*ui.completions_pool);
+    if !ui.completions_pool.block_allocator.proc {
+        set_allocators(*ui.completions_pool);
+        setup_completion_menu(ui);
+    }
 
     reset(*ui.completions_pool);
     pool := Allocator.{pool_allocator_proc, *ui.completions_pool};
 
     ui.completions.matched_prefix_length = new_completions.matched_prefix_length;
     ui.completions.values = NewArray(new_completions.values.count, string,, pool);
+    array_reset(*ui.completion_menu.items);
+
     for new_completions.values {
+        assert(it.count != 0);
         ui.completions.values[it_index] = copy_string(it,, pool);
+        popup_menu_push_item(*ui.completion_menu, it);
+    }
+
+    if ui.completions.values {
+        ui.completion_menu.flags = .OPEN;
     }
 }
 
@@ -4233,7 +4256,38 @@ do_text_search_ui :: (using ui: *Text_Search_UI, font: My_Dynamic_Font, mouse: V
         event_out |= handled;
     }
 
+    if completions.values.count > 0 && completions.matched_prefix_length != completions.values[0].count {
+        handle_mouse_: Mouse_Interaction;
+        if handle_mouse then handle_mouse_ = .CLICK;
+
+        menu_rect := rectangle_of(*completion_menu);
+        mouse_in_rect := axis_aligned_rectangle_contains(menu_rect, mouse);
+        if mouse_in_rect then handle_mouse_ |= .HOVER;
+
+        event_out |= do_popup_menu(*completion_menu, mouse, handle_mouse_, do_draw);
+
+        if event_out & .CLICK {
+            completion_menu_apply_item(ui);
+        }
+
+        if mouse_in_rect {
+            event_out |= .HOVER;
+        }
+    }
+
     return event_out;
+}
+
+completion_menu_apply_item :: (ui: *Text_Search_UI) {
+    if ui.completion_menu.hovered_item == -1 return;
+
+    item := ui.completion_menu.items[ui.completion_menu.hovered_item];
+    tail := advance(item.text, ui.completions.matched_prefix_length);
+    inline text_input_insert_text_at_cursor(*ui.text_input, tail);
+
+    reset_search_results(*the_text_buffer, xx ui.text_input.buffer);
+    new_completions := update_search_results(need_completions=true);
+    save_completions(ui, new_completions);
 }
 
 //
@@ -4443,12 +4497,14 @@ anchor_button_popup_menu_callback :: (menu: *Popup_Menu, event: Popup_Menu.Event
 //
 
 Popup_Menu :: struct {
-    top: float;
-    left: float;
     at: Vector2;
+    relative_to: Point_Relative_To;
+
     items: [..] Popup_Menu_Item;
     hovered_item: s16 = -1;
-    flags: enum_flags { OPEN; };
+    flags: enum_flags { OPEN; ICONS; CLOSE_ON_CLICK; };
+
+    font: *My_Dynamic_Font;
 
     callback: Callback;
     callback_data: Any;
@@ -4488,14 +4544,18 @@ popup_menu_hovered_item_bg_color :: #run hex_color("505050");
 popup_menu_item_bg_color :: text_search_ui_background_color;
 popup_menu_item_text_color :: main_text_pane_text_color;
 
-open_the_popup_menu :: inline (at: Vector2, callback: Popup_Menu.Callback) -> *Popup_Menu {
-    return open_the_popup_menu(at, callback, null);
+Popup_Menu_Default_Flags: type_of(Popup_Menu.flags) : .ICONS | .CLOSE_ON_CLICK;
+
+open_the_popup_menu :: inline (at: Vector2, callback: Popup_Menu.Callback, flags := Popup_Menu_Default_Flags) -> *Popup_Menu {
+    return open_the_popup_menu(at, callback, null, flags);
 }
 
-open_the_popup_menu :: (at: Vector2, callback: Popup_Menu.Callback, callback_data: $T) -> *Popup_Menu {
+open_the_popup_menu :: (at: Vector2, callback: Popup_Menu.Callback, callback_data: $T, flags := Popup_Menu_Default_Flags) -> *Popup_Menu {
     menu := *the_popup_menu;
     array_reset(*menu.items);
     reset(*menu.pool);
+
+    menu.font = *ui_font;
 
     menu.callback = callback;
     info :: type_info(T);
@@ -4507,10 +4567,10 @@ open_the_popup_menu :: (at: Vector2, callback: Popup_Menu.Callback, callback_dat
         cast(*T, menu.callback_data.value_pointer).* = callback_data;
     }
 
-    menu.at = at;
-    menu.left = at.x;
-    menu.top = at.y;
     menu.flags |= .OPEN;
+    menu.flags |= flags;
+    menu.at = at;
+    menu.relative_to = .TOP_LEFT;
 
     return menu;
 }
@@ -4527,7 +4587,9 @@ popup_menu_handle_click :: (menu: *Popup_Menu) {
         menu.callback(menu, .CLICK);
     }
 
-    menu.flags &= ~.OPEN;
+    if menu.flags & .CLOSE_ON_CLICK {
+        menu.flags &= ~.OPEN;
+    }
 }
 
 do_popup_menu :: (menu: *Popup_Menu, mouse: Vector2, handle_mouse: Mouse_Interaction, $do_draw := false) -> mouse_handled: Mouse_Interaction {
@@ -4537,7 +4599,7 @@ do_popup_menu :: (menu: *Popup_Menu, mouse: Vector2, handle_mouse: Mouse_Interac
         return 0;
     }
 
-    font := ui_font;
+    font := menu.font;
     assert(menu.flags & .OPEN != 0);
 
     text_color := main_text_pane_text_color;
@@ -4545,7 +4607,10 @@ do_popup_menu :: (menu: *Popup_Menu, mouse: Vector2, handle_mouse: Mouse_Interac
     h := font.line_height;
     text_y_tweak := -(font.typical_descender + font.max_descender) / 2;
     x_pad := text_y_tweak;
-    text_x_tweak := h + x_pad;
+    text_x_tweak := x_pad;
+    if menu.flags & .ICONS {
+        text_x_tweak += h;
+    }
 
     rect := rectangle_of(menu);
 
@@ -4563,14 +4628,14 @@ do_popup_menu :: (menu: *Popup_Menu, mouse: Vector2, handle_mouse: Mouse_Interac
     click := (handle_mouse & .CLICK) && is_click(.MOUSE_BUTTON_LEFT);
 
     // draw the text
-    x := menu.left;
-    y_top := menu.top;
+    x := rect.left;
+    y_top := rect.top;
     for menu.items {
         y_bottom := y_top - h;
-        defer y_top = y_bottom;
+        defer y_top = xx y_bottom;
 
         hover := false;
-        if (handle_mouse & .HOVER) && (mouse.y >= y_bottom && mouse.y < y_top) {
+        if (handle_mouse & .HOVER) && (mouse.y >= xx y_bottom && mouse.y < xx y_top) {
             hover = true;
             menu.hovered_item = xx it_index;
             if click {
@@ -4586,7 +4651,9 @@ do_popup_menu :: (menu: *Popup_Menu, mouse: Vector2, handle_mouse: Mouse_Interac
                 draw_axis_aligned_rectangle(xx x, xx y_bottom, xx rect.width, xx h, popup_menu_hovered_item_bg_color);
             }
 
-            draw_icon(x + h / 2.0, y_bottom + h / 2.0, it.icon);
+            if menu.flags & .ICONS {
+                draw_icon(x + h / 2.0, y_bottom + h / 2.0, it.icon);
+            }
 
             Simp.draw_text(font.regular, xx x + text_x_tweak, xx y_bottom + text_y_tweak, it.text, popup_menu_item_text_color);
         }
@@ -4596,12 +4663,12 @@ do_popup_menu :: (menu: *Popup_Menu, mouse: Vector2, handle_mouse: Mouse_Interac
 }
 
 rectangle_of :: (menu: *Popup_Menu) -> Rectangle {
-    font := ui_font;
+    font := menu.font;
 
     h := font.line_height;
     text_y_tweak := -(font.typical_descender + font.max_descender) / 2;
     x_pad := text_y_tweak;
-    text_x_tweak := h + x_pad;
+    text_x_tweak := ifx menu.flags & .ICONS then h + x_pad else x_pad;
 
     text_w_max := 0;
     for menu.items {
@@ -4611,21 +4678,60 @@ rectangle_of :: (menu: *Popup_Menu) -> Rectangle {
 
     b := popup_menu_border_width;
 
-    X := menu.left;
     H := h * menu.items.count;
-    Y := menu.top - H + 1;
     W := text_w_max + text_x_tweak + x_pad;
 
-    overflow := 0 - (Y - b);                if overflow > 0 { menu.top += overflow; Y += overflow; }
-    overflow = (Y + H + b) - window_size.y; if overflow > 0 { menu.top -= overflow; Y -= overflow; }
-    overflow = 0 - (X - b);                 if overflow > 0 { menu.left += overflow; X += overflow; }
-    overflow = (X + W + b) - window_size.x; if overflow > 0 { menu.left -= overflow; X -= overflow; }
-
     rect: Rectangle;
-    rect.left = xx X;
     rect.width = xx W;
     rect.height = xx H;
-    rect.top = xx (Y + H);
+
+    if #complete menu.relative_to == {
+        case .TOP_LEFT; #through;
+        case .BOTTOM_LEFT; #through;
+        case .CENTER_LEFT;
+            rect.left = xx menu.at.x;
+        case .TOP_RIGHT; #through;
+        case .BOTTOM_RIGHT; #through;
+        case .CENTER_RIGHT;
+            rect.left = xx (menu.at.x - W);
+        case .TOP_CENTER; #through;
+        case .BOTTOM_CENTER; #through;
+        case .CENTER;
+            rect.left = xx (menu.at.x - W / 2);
+    }
+
+    if #complete menu.relative_to == {
+        case .TOP_LEFT; #through;
+        case .TOP_RIGHT; #through;
+        case .TOP_CENTER;
+            rect.top = xx menu.at.y;
+        case .BOTTOM_LEFT; #through;
+        case .BOTTOM_RIGHT; #through;
+        case .BOTTOM_CENTER;
+            rect.top = xx (menu.at.y + H);
+        case .CENTER_LEFT; #through;
+        case .CENTER_RIGHT; #through;
+        case .CENTER;
+            rect.top = xx (menu.at.y + H / 2);
+    }
+
+    overflow := 0 - (rect.top - H - b);                 if overflow > 0 { rect.top += xx overflow; }
+    overflow = (rect.top + b) - window_size.y;  if overflow > 0 { rect.top -= xx overflow; }
+    overflow = 0 - (rect.left - b);                 if overflow > 0 { rect.left += xx overflow; }
+    overflow = (rect.left + W + b) - window_size.x; if overflow > 0 { rect.left -= xx overflow; }
+
+    if rect.height + b * 2 > window_size.y {
+        if menu.relative_to == {
+            case .TOP_LEFT; #through;
+            case .TOP_RIGHT; #through;
+            case .TOP_CENTER;
+                rect.top = xx menu.at.y;
+            case .BOTTOM_LEFT; #through;
+            case .BOTTOM_RIGHT; #through;
+            case .BOTTOM_CENTER;
+                rect.top = xx (menu.at.y + H);
+        }
+    }
 
     return rect;
 }
@@ -7168,7 +7274,7 @@ System :: #import "System";
 #import "File";
 #import "File_Utilities";
 #import "Clipboard";
-#import "Pool";
+#import "Pool"()(USE_UNMAPPING_ALLOCATOR=true);
 Hash :: #import "Hash";
 Default_Allocator :: #import "Default_Allocator";
 #import "Compiler";
