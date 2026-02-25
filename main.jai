@@ -801,7 +801,7 @@ update_and_draw_frame :: () -> bool {
             top_index, bottom_index := old_index, new_index;
             if top_index > bottom_index then swap(*top_index, *bottom_index);
 
-            color := anchor_line_highlight_color;
+            color := jump_visualizer_line_color_dim;
             w := 2.0;
             x_middle := parent_right - H / 2.0;
             x := x_middle - w / 2.0;
@@ -870,11 +870,12 @@ update_and_draw_frame :: () -> bool {
         }
 
         // jump visualizer on scroll bar
+        if !is_down(.MOUSE_BUTTON_MIDDLE)
         {
             top_index, bottom_index := old_index, new_index;
             if top_index > bottom_index then swap(*top_index, *bottom_index);
 
-            color := anchor_line_highlight_color;
+            color := jump_visualizer_line_color_bright;
             w := 2.0;
             x_middle := left(scroll_bar_rect) - 22.0;
 
@@ -889,6 +890,13 @@ update_and_draw_frame :: () -> bool {
             end_h := w;
             draw_axis_aligned_rectangle(xx x, xx y_top, xx end_w, xx end_h, color);
             draw_axis_aligned_rectangle(xx x, xx y_bottom, xx end_w, xx end_h, color);
+
+            {
+                x_tweak := 16;
+                w := 5;
+                draw_axis_aligned_rectangle(xx (x + x_tweak), xx y_top, xx w, xx end_h, color);
+                draw_axis_aligned_rectangle(xx (x + x_tweak), xx y_bottom, xx w, xx end_h, color);
+            }
         }
     }
 
@@ -1473,6 +1481,8 @@ old_jump_for_time_vis: float64;
 jump_history: [..] float64;
 current_position_in_jump_history := 0;
 debug_jump_history := false;
+jump_visualizer_line_color_dim :: #run hex_color("a0a0a0");
+jump_visualizer_line_color_bright :: #run hex_color("d0d0d0");
 
 push_jump_to_history :: (scroll_rows: float64) {
     if jump_history && jump_history[current_position_in_jump_history] == scroll_rows return;
@@ -3754,7 +3764,7 @@ parse_search_query_leaf :: (text: string, buffer: *Log_Text_Buffer = null, $need
             }
         }
 
-        return .{}, false, .{completions, last_word.count}, cursor;
+        return .{}, false, make_completions(completions, last_word), cursor;
     }
     cursor += 1;
 
@@ -3783,12 +3793,12 @@ parse_search_query_leaf :: (text: string, buffer: *Log_Text_Buffer = null, $need
         }
     }
 
-    if !match return .{}, false, .{completions, type_string.count}, cursor;
+    if !match return .{}, false, make_completions(completions, type_string), cursor;
 
     // skip spaces
     while (cursor < text.count) && (inline is_space(text[cursor])) cursor += 1;
 
-    if cursor == text.count return result, true, .{string.["="], 0}, cursor;
+    if cursor == text.count return result, true, make_completions(.["="]), cursor;
 
     if text[cursor] != #char "=" return .{}, false, .{}, cursor;
     cursor += 1;
@@ -3800,7 +3810,7 @@ parse_search_query_leaf :: (text: string, buffer: *Log_Text_Buffer = null, $need
 
     // nothing after =, complete every possible entity
     if cursor == text.count {
-        return result, true, .{all_values, 0}, cursor;
+        return result, true, make_completions(all_values), cursor;
     }
 
     if text[cursor] == #char "\"" {
@@ -3835,7 +3845,7 @@ parse_search_query_leaf :: (text: string, buffer: *Log_Text_Buffer = null, $need
         }
     }
 
-    return result, true, .{completions, result.value.count}, cursor;
+    return result, true, make_completions(completions, result.value), cursor;
 }
 
 // result allocated with context.allocator
@@ -4101,10 +4111,11 @@ Text_Search_UI :: struct {
 }
 the_text_search_ui: Text_Search_UI;
 
-text_search_ui_background_color :: ui_element_background_color;
-text_search_ui_border_color     :: ui_element_border_color;
-text_search_ui_cursor_color     :: ui_element_cursor_color;
-text_search_ui_text_color       :: ui_element_text_color;
+text_search_ui_background_color         :: ui_element_background_color;
+text_search_ui_border_color             :: ui_element_border_color;
+text_search_ui_cursor_color             :: ui_element_cursor_color;
+text_search_ui_text_color               :: ui_element_text_color;
+text_search_ui_text_suggestion_color    :: main_text_pane_dim_text_color;
 text_search_ui_border_width :: 3.0;
 
 open_text_search_ui :: () {
@@ -4118,12 +4129,23 @@ close_text_search_ui :: () {
 Completions :: struct {
     values: [] string;
     matched_prefix_length: int;
+    selected_item: int = -1;
+}
+
+make_completions :: (values: [] string) -> Completions { return make_completions(values, ""); }
+make_completions :: (values: [] string, prefix: string) -> Completions {
+    quick_sort(values, compare_strings);
+    return .{values, prefix.count, -1};
 }
 
 text_search_ui_handle_input_event :: (event: Input.Event) -> handled: bool {
     using the_text_search_ui;
 
     status := text_input_handle_event(*text_input, event, completions);
+    if !status {
+        handled := completion_menu_handle_input_event(*the_text_search_ui, event);
+        if handled status = .HANDLED;
+    }
     if !status return false;
 
     if status & .TEXT_CHANGED {
@@ -4146,15 +4168,6 @@ text_search_ui_handle_input_event :: (event: Input.Event) -> handled: bool {
     return xx status;
 }
 
-setup_completion_menu :: (ui: *Text_Search_UI) {
-    ui.completion_menu.allocator = .{pool_allocator_proc, *ui.completions_pool};
-    ui.completion_menu.items.allocator = .{pool_allocator_proc, *ui.completions_pool};
-    ui.completion_menu.at.x = xx (left(ui.rect) + 5);
-    ui.completion_menu.at.y = xx top(ui.rect);
-    ui.completion_menu.relative_to = .BOTTOM_LEFT;
-    ui.completion_menu.font = *main_font;
-}
-
 save_completions :: (ui: *Text_Search_UI, new_completions: Completions) {
     if !ui.completions_pool.block_allocator.proc {
         set_allocators(*ui.completions_pool);
@@ -4166,7 +4179,9 @@ save_completions :: (ui: *Text_Search_UI, new_completions: Completions) {
 
     ui.completions.matched_prefix_length = new_completions.matched_prefix_length;
     ui.completions.values = NewArray(new_completions.values.count, string,, pool);
+    ui.completions.selected_item = -1;
     array_reset(*ui.completion_menu.items);
+    ui.completion_menu.hovered_item = -1;
 
     for new_completions.values {
         assert(it.count != 0);
@@ -4176,6 +4191,11 @@ save_completions :: (ui: *Text_Search_UI, new_completions: Completions) {
 
     if ui.completions.values {
         ui.completion_menu.flags = .OPEN;
+    }
+
+    if ui.completions.values.count == 1 {
+        ui.completions.selected_item = 0;
+        ui.completion_menu.hovered_item = 0;
     }
 }
 
@@ -4227,6 +4247,7 @@ do_text_search_ui :: (using ui: *Text_Search_UI, font: My_Dynamic_Font, mouse: V
     }
 
     #if do_draw {
+        text_input.suggested_text = completion_menu_selected_completion_suggestion(ui);
         click_handled := draw_text_input(*text_input, rect, text_x, text_y, font.regular, text_search_ui_text_color, handle_mouse);
         if click_handled then event_out |= .CLICK;
     }
@@ -4256,7 +4277,9 @@ do_text_search_ui :: (using ui: *Text_Search_UI, font: My_Dynamic_Font, mouse: V
         event_out |= handled;
     }
 
-    if completions.values.count > 0 && completions.matched_prefix_length != completions.values[0].count {
+    have_completions := completions.values.count > 0;
+    full_match := (completions.values.count == 1 && completions.values[0].count == completions.matched_prefix_length);
+    if have_completions && !full_match {
         handle_mouse_: Mouse_Interaction;
         if handle_mouse then handle_mouse_ = .CLICK;
 
@@ -4265,6 +4288,7 @@ do_text_search_ui :: (using ui: *Text_Search_UI, font: My_Dynamic_Font, mouse: V
         if mouse_in_rect then handle_mouse_ |= .HOVER;
 
         event_out |= do_popup_menu(*completion_menu, mouse, handle_mouse_, do_draw);
+        completions.selected_item = completion_menu.hovered_item;
 
         if event_out & .CLICK {
             completion_menu_apply_item(ui);
@@ -4278,16 +4302,71 @@ do_text_search_ui :: (using ui: *Text_Search_UI, font: My_Dynamic_Font, mouse: V
     return event_out;
 }
 
-completion_menu_apply_item :: (ui: *Text_Search_UI) {
-    if ui.completion_menu.hovered_item == -1 return;
+//
+// completion menu
+//
+
+setup_completion_menu :: (ui: *Text_Search_UI) {
+    ui.completion_menu.allocator = .{pool_allocator_proc, *ui.completions_pool};
+    ui.completion_menu.items.allocator = .{pool_allocator_proc, *ui.completions_pool};
+    ui.completion_menu.at.x = xx (left(ui.rect) + 5);
+    ui.completion_menu.at.y = xx top(ui.rect);
+    ui.completion_menu.relative_to = .BOTTOM_LEFT;
+    ui.completion_menu.font = *main_font;
+}
+
+completion_menu_selected_completion_suggestion :: (ui: *Text_Search_UI) -> string {
+    if ui.completion_menu.hovered_item == -1 return "";
 
     item := ui.completion_menu.items[ui.completion_menu.hovered_item];
     tail := advance(item.text, ui.completions.matched_prefix_length);
+    return tail;
+}
+
+completion_menu_apply_item :: (ui: *Text_Search_UI) {
+    if ui.completion_menu.hovered_item == -1 return;
+
+    // Apply the completion
+    tail := inline completion_menu_selected_completion_suggestion(ui);
     inline text_input_insert_text_at_cursor(*ui.text_input, tail);
 
+    // Recalculate completions
     reset_search_results(*the_text_buffer, xx ui.text_input.buffer);
     new_completions := update_search_results(need_completions=true);
     save_completions(ui, new_completions);
+}
+
+completion_menu_handle_input_event :: (ui: *Text_Search_UI, event: Input.Event) -> handled: bool {
+    if !event.key_pressed return false;
+    if event.alt_pressed return false;
+
+    if event.key_code == {
+        case .ARROW_UP;
+            using ui.completion_menu;
+            if items {
+                if hovered_item == -1 {
+                    hovered_item = xx (items.count - 1);
+                } else if hovered_item > 0 {
+                    hovered_item -= 1;
+                }
+            }
+            ui.completions.selected_item = hovered_item;
+            return true;
+
+        case .ARROW_DOWN;
+            using ui.completion_menu;
+            if items {
+                if hovered_item == -1 {
+                    hovered_item = 0;
+                } else if hovered_item < items.count - 1 {
+                    hovered_item += 1;
+                }
+            }
+            ui.completions.selected_item = hovered_item;
+            return true;
+    }
+
+    return false;
 }
 
 //
@@ -4634,9 +4713,7 @@ do_popup_menu :: (menu: *Popup_Menu, mouse: Vector2, handle_mouse: Mouse_Interac
         y_bottom := y_top - h;
         defer y_top = xx y_bottom;
 
-        hover := false;
         if (handle_mouse & .HOVER) && (mouse.y >= xx y_bottom && mouse.y < xx y_top) {
-            hover = true;
             menu.hovered_item = xx it_index;
             if click {
                 popup_menu_handle_click(menu);
@@ -4647,7 +4724,7 @@ do_popup_menu :: (menu: *Popup_Menu, mouse: Vector2, handle_mouse: Mouse_Interac
         }
 
         #if do_draw {
-            if hover {
+            if menu.hovered_item == it_index {
                 draw_axis_aligned_rectangle(xx x, xx y_bottom, xx rect.width, xx h, popup_menu_hovered_item_bg_color);
             }
 
@@ -5015,6 +5092,8 @@ Text_Input_State :: struct {
     cursor: int;
     selection_start: int;
 
+    suggested_text: string;
+
     flags: enum_flags {
         SELECTION_ACTIVE;
         SELECTION_DRAGGING;
@@ -5148,8 +5227,8 @@ text_input_handle_event :: (state: *Text_Input_State, event: Input.Event, comple
             }
             return .HANDLED;
 
-        case .ARROW_UP; // TODO: history
-        case .ARROW_DOWN; // TODO: history
+        // case .ARROW_UP; // TODO: history
+        // case .ARROW_DOWN; // TODO: history
 
         case .HOME;
             text_input_update_selection_state_for_movement(state, event.shift_pressed);
@@ -5212,7 +5291,12 @@ text_input_handle_event :: (state: *Text_Input_State, event: Input.Event, comple
             }
 
         case .TAB;
-            if completions.values {
+            if completions.selected_item != -1 && completions.values {
+                item := completions.values[completions.selected_item];
+                to_append := advance(item, completions.matched_prefix_length);
+                text_input_append_text(state, to_append);
+                return .TEXT_CHANGED;
+            } else if completions.values {
                 to_skip := completions.matched_prefix_length;
                 common_prefix := completions.values[0];
                 for item: advance(completions.values, 1) {
@@ -5228,8 +5312,7 @@ text_input_handle_event :: (state: *Text_Input_State, event: Input.Event, comple
                 }
                 if common_prefix.count > to_skip {
                     to_append := advance(common_prefix, to_skip);
-                    array_insert_at(*state.buffer, cast([] u8) to_append, state.cursor);
-                    state.cursor += to_append.count;
+                    text_input_append_text(state, to_append);
                     return .TEXT_CHANGED;
                 }
             }
@@ -5400,7 +5483,7 @@ draw_text_input :: (state: *Text_Input_State, rect: Rectangle, x: float, y: floa
     cursor_y := y + cursor_y_tweak;
     cursor_h := font.character_height;
 
-    Simp.prepare_text(font, xx state.buffer);
+    text_w := Simp.prepare_text(font, xx state.buffer);
 
     click_handled := false;
     mouse_in_rect := axis_aligned_rectangle_contains(rect, mouse);
@@ -5462,12 +5545,19 @@ draw_text_input :: (state: *Text_Input_State, rect: Rectangle, x: float, y: floa
         draw_axis_aligned_rectangle(start, cursor_y, end - start, xx cursor_h, color_orange);
     }
 
+    // Actual text
     Simp.draw_prepared_text(font, xx x, xx y, text_search_ui_text_color);
 
+    // Cursor
     {
         cursor_w := 2;
 
         draw_axis_aligned_rectangle(cursor_x, cursor_y, xx cursor_w, xx cursor_h, fg_color);
+    }
+
+    // Completion suggestion text
+    if state.suggested_text && state.cursor == state.buffer.count {
+        Simp.draw_text(font, xx (x + text_w), xx y, state.suggested_text, text_search_ui_text_suggestion_color);
     }
 
     return click_handled;
@@ -6822,20 +6912,20 @@ quick_sort :: inline (array: [] $T, $f: (T, T) -> $R) -> [] T {  // R is an inte
     quicksort_helper :: (a: *T, n: s64) {
         if n < 2 return;
 
-        p := a[n / 2];
+        p := (a + n / 2).*;
 
         i := 0;
         j := n-1;
 
         while true {
-            while (inline f(a[i], p)) < 0  {i += 1;}
-            while (inline f(p, a[j])) < 0  {j -= 1;}
+            while (inline f((a + i).*, p)) < 0  {i += 1;}
+            while (inline f(p, (a + j).*)) < 0  {j -= 1;}
 
             if i >= j break;
 
-            t := a[i];
-            a[i] = a[j];
-            a[j] = t;
+            t := (a + i).*;
+            (a + i).* = (a + j).*;
+            (a + j).* = t;
 
             i += 1;
             j -= 1;
@@ -6854,21 +6944,21 @@ quick_sort :: inline (array: [] $T, $f: (T) -> $R) -> [] T {  // R is an integer
     quicksort_helper :: (a: *T, n: s64) {
         if n < 2 return;
 
-        p := a[n / 2];
+        p := (a + n / 2).*;
 
         i := 0;
         j := n-1;
 
         while true {
             fp := f(p);
-            while f(a[i]) < fp  {i += 1;}
-            while fp < f(a[j])  {j -= 1;}
+            while f((a + i).*) < fp  {i += 1;}
+            while fp < f((a + j).*)  {j -= 1;}
 
             if i >= j break;
 
-            t := a[i];
-            a[i] = a[j];
-            a[j] = t;
+            t := (a + i).*;
+            (a + i).* = (a + j).*;
+            (a + j).* = t;
 
             i += 1;
             j -= 1;
@@ -6880,6 +6970,19 @@ quick_sort :: inline (array: [] $T, $f: (T) -> $R) -> [] T {  // R is an integer
 
     quicksort_helper(array.data, array.count);
     return array;
+}
+
+// Stole this from modules/Sort, no changes
+compare_strings :: (a: string, b: string) -> s64 {
+    for 0..a.count-1 {
+        if it >= b.count return 1;
+
+        delta := cast(s64) a[it] - cast(s64) b[it];
+        if delta return delta;
+    }
+
+    if b.count > a.count return -1;
+    return 0;
 }
 
 test_quick_sort :: () {
