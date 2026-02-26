@@ -4433,7 +4433,10 @@ anchor_button_toggle :: (line_index: int) {
         free(explicit_anchors[anchor_index].text);
         array_unordered_remove_by_index(*explicit_anchors, anchor_index);
     } else {
-        array_add(*explicit_anchors, make_anchor(line_index));
+        anchor := make_anchor(line_index);
+        source_id := the_text_buffer.line_infos[line_index].source_id;
+        anchor.color = get_log_source_color(source_id);
+        array_add(*explicit_anchors, anchor);
     }
     quick_sort(explicit_anchors, (l, r) => l.line_index - r.line_index);
 
