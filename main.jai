@@ -106,7 +106,8 @@ main :: () {
 
     Profile();
     filenames := get_log_filenames_from_paths(input_file_full_paths);
-    request_load_text_buffer_data(*the_text_buffer, filenames, input_from_clipboard, skip_until_timestamp);
+    type: Parsing_Request.Type = ifx input_from_clipboard then .LOAD_CLIPBOARD else .LOAD_FILE;
+    request_load_text_buffer_data(*the_text_buffer, filenames, type, skip_until_timestamp);
     Profile();
 
     reload_main_font();
@@ -466,7 +467,7 @@ update_and_draw_frame :: () -> bool {
 
         else if it.type == .DRAG_AND_DROP_FILES {
             filenames := get_log_filenames_from_paths(it.files);
-            request_load_text_buffer_data(*the_text_buffer, filenames);
+            request_load_text_buffer_data(*the_text_buffer, filenames, .LOAD_FILE);
         }
 
         // modules/Input doesn't set it.ctrl_pressed for MOUSE_WHEEL :(
@@ -503,10 +504,12 @@ update_and_draw_frame :: () -> bool {
             request_redraw(tprint("scroll at %", #line));
         }
 
-        else if it.type == .MOUSE_WHEEL && !modifiers && !draggin_scroll_bar {
+        else if it.type == .MOUSE_WHEEL && !(modifiers & (.SHIFT | .CTRL)) && !draggin_scroll_bar {
             ofs := it.wheel_delta / cast(float) it.typical_wheel_delta;
             pane_height_in_lines := text_pane_rect.height / main_font.line_height;
-            target_scroll_rows += -ofs * (pane_height_in_lines / 8);
+            ofs = -ofs * (pane_height_in_lines / 8);
+            if modifiers & .ALT then ofs = sign(ofs);
+            target_scroll_rows += ofs;
             target_scroll_rows = clamp(target_scroll_rows, -text_pane_row_count / 2.0, total_line_count - text_pane_row_count / 2.0);
             request_redraw(tprint("scroll at %", #line));
         }
@@ -590,8 +593,12 @@ update_and_draw_frame :: () -> bool {
         } else if it.key_pressed && it.ctrl_pressed && it.shift_pressed && it.key_code == #char "V" {
             Profile();
             // TODO: remove existing anchors
-            request_load_text_buffer_data(*the_text_buffer, from_clipboard=true);
+            request_load_text_buffer_data(*the_text_buffer, type=.LOAD_CLIPBOARD);
             Profile();
+        } else if it.key_pressed && it.alt_pressed && it.shift_pressed && it.key_code == #char "S" {
+            request_load_text_buffer_data(*the_text_buffer, .["ssh.exe", "thank-pad", "tmux", "showb"], type=.LOAD_EXTERNAL_COMMAND);
+        } else if it.key_pressed && it.alt_pressed && it.shift_pressed && it.key_code == #char "P" {
+            request_load_text_buffer_data(*the_text_buffer, .["ssh.exe", "thank-pad", "tmux", "capture-pane", "-pJS-"], type=.LOAD_EXTERNAL_COMMAND);
         } else if it.key_pressed && it.ctrl_pressed && it.key_code == #char "Z" {
             if it.shift_pressed
                 request_buffer_text_redo(*the_text_buffer);
@@ -2119,26 +2126,40 @@ do_undo_or_redo :: (buffer: *Log_Text_Buffer, type: Parsing_Request.Type) {
     Profile("process_text_buffer_data");
 }
 
-load_text_buffer_data :: (buffer: *Log_Text_Buffer, _filenames: [] string = .[], from_clipboard := false, skip_until: Calendar_Time = .{}) {
+load_text_buffer_data :: (buffer: *Log_Text_Buffer, arguments: [] string = .[], type: Parsing_Request.Type, skip_until: Calendar_Time = .{}) {
     mark := get_temporary_storage_mark();
     defer set_temporary_storage_mark(mark);
 
     new_data: string;
-    if from_clipboard {
+    if type == {
+    case .LOAD_FILE;
+        assert(arguments.count > 0);
+
+        buffer.parsing_state = "reading from file";
+
+        filenames := arguments;
+
+        buffer.skipped_based_on_timestamp = 0;
+        new_data = load_data_from_files(buffer, filenames, skip_until);
+
+    case .LOAD_EXTERNAL_COMMAND;
+        assert(arguments.count > 0);
+
+        buffer.parsing_state = tprint("running external command: %", arguments);
+
+        status, stdout, stderr := run_command(..arguments, capture_and_return_output=true);
+        // TODO @Incomplete handle error cases
+        new_data = stdout;
+
+    case .LOAD_CLIPBOARD;
         // FIXME: should probably wrap this and other places with a mutex lock...
         buffer.parsing_state = "reading from clipboard";
 
         log("reading text data from clipboard");
         new_data = os_clipboard_get_text();
-    } else {
-        assert(_filenames.count > 0);
 
-        buffer.parsing_state = "reading from file";
-
-        filenames := _filenames;
-
-        buffer.skipped_based_on_timestamp = 0;
-        new_data = load_data_from_files(buffer, filenames, skip_until);
+    case;
+        assert(false, "unreachable");
     }
 
     update_buffer_text(buffer, new_data);
@@ -2466,10 +2487,17 @@ start_parsing_thread :: (buffer: *Log_Text_Buffer) {
 Parsing_Request :: struct {
     version: u64;
 
-    Type :: enum { LOAD_FILE; LOAD_CLIPBOARD; REMOVE_LINE_RANGE; UNDO; REDO; };
+    Type :: enum {
+        LOAD_FILE;
+        LOAD_EXTERNAL_COMMAND;
+        LOAD_CLIPBOARD;
+        REMOVE_LINE_RANGE;
+        UNDO;
+        REDO;
+    };
     type: Type;
 
-    filenames: [..] string;       // for .LOAD_FILE
+    arguments: [..] string;       // for .LOAD_FILE or .LOAD_EXTERNAL_COMMAND
     remove_line_first: s64; // for .REMOVE_LINE_RANGE
     remove_line_last: s64;  // for .REMOVE_LINE_RANGE
     skip_until: Calendar_Time; // for .LOAD_FILE
@@ -2485,17 +2513,17 @@ copy_request :: (request: *Parsing_Request) -> Parsing_Request {
     remove_line_last = request.remove_line_last;
     skip_until = request.skip_until;
 
-    array_reserve(*filenames, request.filenames.count);
-    for request.filenames array_add(*filenames, copy_string(it));
+    array_reserve(*arguments, request.arguments.count);
+    for request.arguments array_add(*arguments, copy_string(it));
 
     return copy;
 }
 
-set_filenames :: (request: *Parsing_Request, filenames: [] string) {
-    for request.filenames free(it);
-    request.filenames.count = 0;
-    for filenames {
-        if it array_add(*request.filenames, copy_string(it));
+set_arguments :: (request: *Parsing_Request, arguments: [] string) {
+    for request.arguments free(it);
+    request.arguments.count = 0;
+    for arguments {
+        if it array_add(*request.arguments, copy_string(it));
     }
 }
 
@@ -2522,8 +2550,9 @@ parsing_thread_proc :: (thread: *Thread) -> s64 {
 
         if #complete request.type == {
         case .LOAD_FILE; #through;
+        case .LOAD_EXTERNAL_COMMAND; #through;
         case .LOAD_CLIPBOARD;
-            load_text_buffer_data(buffer, request.filenames, request.type == .LOAD_CLIPBOARD, request.skip_until);
+            load_text_buffer_data(buffer, request.arguments, request.type, request.skip_until);
         case .REMOVE_LINE_RANGE;
             remove_line_range(buffer, request.remove_line_first, request.remove_line_last);
 
@@ -2538,18 +2567,24 @@ parsing_thread_proc :: (thread: *Thread) -> s64 {
     return 0;
 }
 
-request_load_text_buffer_data :: (buffer: *Log_Text_Buffer, filenames: [] string = .[], from_clipboard := false, skip_until: Calendar_Time = .{}) {
+request_load_text_buffer_data :: (buffer: *Log_Text_Buffer, arguments: [] string = .[], type: Parsing_Request.Type, skip_until: Calendar_Time = .{}) {
     goto_definition_helper :: load_text_buffer_data;
+
+    assert(type == .LOAD_FILE || type == .LOAD_CLIPBOARD || type == .LOAD_EXTERNAL_COMMAND, "%", type);
+
     lock(*buffer.request.mutex);
     defer unlock(*buffer.request.mutex);
 
     buffer.request.version += 1;
-    buffer.request.type = ifx from_clipboard then .LOAD_CLIPBOARD else .LOAD_FILE;
-    set_filenames(*buffer.request, filenames);
-    if from_clipboard {
+    buffer.request.type = type;
+    set_arguments(*buffer.request, arguments);
+    if type == {
+    case .LOAD_FILE;
+        set_buffer_filename(buffer, ..arguments);
+    case .LOAD_EXTERNAL_COMMAND;
+        set_buffer_filename(buffer, get_quoted_command_string(arguments,, temp));
+    case .LOAD_CLIPBOARD;
         set_buffer_filename(buffer, "clipboard contents");
-    } else {
-        set_buffer_filename(buffer, ..filenames);
     }
     buffer.request.skip_until = skip_until;
 
@@ -6752,6 +6787,10 @@ common_postfix :: (values: [] string) -> string {
     return best_so_far;
 }
 
+external_command_string :: (arguments: [] string) -> string {
+    return get_quoted_command_string(arguments);
+}
+
 extract_unique_middles :: (values: [] string) -> (pre: string, post: string, mids: [] string) {
     pre := common_prefix(values);
     post := common_postfix(values);
@@ -7387,3 +7426,4 @@ Default_Allocator :: #import "Default_Allocator";
 #import "Thread";
 Sort :: #import "Sort";
 #import "Atomics";
+#import "Process";
