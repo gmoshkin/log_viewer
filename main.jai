@@ -2164,6 +2164,8 @@ load_text_buffer_data :: (buffer: *Log_Text_Buffer, arguments: [] string = .[], 
         assert(false, "unreachable");
     }
 
+    explicit_anchors.count = 0;
+
     update_buffer_text(buffer, new_data);
 
     Profile();
