@@ -78,6 +78,8 @@ main :: () {
                            background_color_rgb = .[.1, .1, .1],
                            wanted_msaa = WANTED_MSAA);
 
+    #if OS == .WINDOWS set_window_dark_mode(window);
+
     // setup drag and drop (copy-pasted from GetRect example.jai)
     #if OS == .WINDOWS {
         // @Feature: Add user-specific typelist support.
@@ -7427,3 +7429,4 @@ Default_Allocator :: #import "Default_Allocator";
 Sort :: #import "Sort";
 #import "Atomics";
 #import "Process";
+#if OS == .WINDOWS #import "DWM";
