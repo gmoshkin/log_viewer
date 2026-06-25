@@ -19,7 +19,7 @@ build :: () {
 
     if #complete config.build_mode == {
     case .DEBUG;
-        options.backend = .X64;
+        if CPU == .X64 options.backend = .X64;
         set_optimization(*options, .DEBUG);
         options.output_executable_name = sprint("%-debug", EXE_NAME);
     case .RELEASE;
